@@ -551,7 +551,9 @@ async function api(req, env, url, user) {
     const staleLots = (await env.DB.prepare("SELECT id, business_id, name, stage, dates, created_at FROM lots WHERE stage IN ('comprado','etiquetado')").all()).results
       .map((l) => ({ ...l, d: JSON.parse(l.dates || "{}").comprado || l.created_at.slice(0, 10) })).filter((l) => (Date.now() - new Date(l.d)) / 864e5 > 14)
       .map((l) => ({ title: `${l.name}: lleva ${Math.floor((Date.now() - new Date(l.d)) / 864e5)} días sin enviarse a Amazon`, due_on: l.d, kind: "lote", link: `#/negocio/${l.business_id}/lotes`, overdue: true }));
-    const upcoming = [...dls.results.map((d) => ({ title: d.title, entity_id: d.entity_id, due_on: d.due_on, kind: "fecha", id: d.id })), ...expiring, ...taxDue, ...cardDue, ...staleLots].sort((a, b) => a.due_on.localeCompare(b.due_on)).slice(0, 8);
+    const caseDue = (await env.DB.prepare("SELECT id, business_id, title, case_number, due_date FROM amazon_cases WHERE status = 'abierto' AND due_date IS NOT NULL").all()).results
+      .map((c) => ({ title: `Caso de Amazon: ${c.title}${c.case_number ? " (" + c.case_number + ")" : ""}`, due_on: c.due_date, kind: "caso", link: `#/negocio/${c.business_id}/casos?c=${c.id}`, overdue: c.due_date < new Date().toISOString().slice(0, 10) }));
+    const upcoming = [...dls.results.map((d) => ({ title: d.title, entity_id: d.entity_id, due_on: d.due_on, kind: "fecha", id: d.id })), ...expiring, ...taxDue, ...cardDue, ...staleLots, ...caseDue].sort((a, b) => a.due_on.localeCompare(b.due_on)).slice(0, 8);
     return json({ businesses: biz.results, entities, upcoming, recent: recent.results, platforms: plats.results, usage: { ...usage, free: STORAGE_FREE_BYTES } });
   }
 
@@ -893,6 +895,45 @@ async function api(req, env, url, user) {
     }
     return new Response(obj.body, { headers: { "content-type": obj.httpMetadata?.contentType || "image/png", "cache-control": "private, max-age=604800" } });
   }
+
+  // Casos de Amazon: paquetes de soportes con número de caso y fecha límite
+  if (p === "/cases" && m === "GET") {
+    const biz = url.searchParams.get("business") || "amazon";
+    const rows = (await env.DB.prepare("SELECT * FROM amazon_cases WHERE business_id = ? ORDER BY CASE status WHEN 'abierto' THEN 0 WHEN 'enviado' THEN 1 ELSE 2 END, COALESCE(due_date, '9999') , created_at DESC").bind(biz).all()).results;
+    return json({ cases: rows.map((c) => ({ ...c, invoice_ids: JSON.parse(c.invoice_ids || "[]"), doc_ids: JSON.parse(c.doc_ids || "[]") })) });
+  }
+  if ((mm = p.match(/^\/cases\/([\w-]+)$/)) && m === "GET") {
+    const c = await env.DB.prepare("SELECT * FROM amazon_cases WHERE id = ?").bind(mm[1]).first();
+    if (!c) return fail("Caso no encontrado.", 404);
+    const ids = JSON.parse(c.invoice_ids || "[]");
+    const invoices = [];
+    for (const id of ids) {
+      const inv = await env.DB.prepare("SELECT i.*, s.name AS supplier, cd.nickname AS card_name, cd.last4 FROM invoices i LEFT JOIN suppliers s ON s.id = i.supplier_id LEFT JOIN cards cd ON cd.id = i.card_id WHERE i.id = ?").bind(id).first();
+      if (!inv) continue;
+      const checks = await invoiceChecks(env, inv);
+      const proof = inv.card_id && inv.issue_date ? await env.DB.prepare("SELECT closing_date FROM card_cycles WHERE card_id = ? AND closing_date >= ? AND file_id IS NOT NULL ORDER BY closing_date LIMIT 1").bind(inv.card_id, inv.issue_date).first() : null;
+      invoices.push({ id: inv.id, supplier: inv.supplier || inv.supplier_name, invoice_number: inv.invoice_number, title: inv.title, issue_date: inv.issue_date, total: inv.total, currency: inv.currency, kind: inv.kind, status: inv.status, card: inv.card_id ? `${inv.card_name} •••• ${inv.last4}` : inv.card_last4 ? `•••• ${inv.card_last4} (no registrada)` : null, proof: !!proof, checks });
+    }
+    return json({ case: { ...c, invoice_ids: ids, doc_ids: JSON.parse(c.doc_ids || "[]") }, invoices });
+  }
+  if ((p === "/cases" && m === "POST") || ((mm = p.match(/^\/cases\/([\w-]+)$/)) && m === "PUT")) {
+    const b = await body();
+    const st = ["abierto", "enviado", "resuelto", "rechazado"].includes(b.status) ? b.status : null;
+    if (m === "POST") {
+      if (!String(b.title || "").trim()) return fail("Describe qué pide Amazon.");
+      const id = uid();
+      await env.DB.prepare("INSERT INTO amazon_cases (id, business_id, title, case_number, kind, due_date, notes, invoice_ids, doc_ids, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+        .bind(id, b.business_id || "amazon", b.title.trim(), b.case_number || null, b.kind || null, isoDate(b.due_date), b.notes || null, JSON.stringify(b.invoice_ids || []), JSON.stringify(b.doc_ids || []), now()).run();
+      return json({ id });
+    }
+    const c = await env.DB.prepare("SELECT * FROM amazon_cases WHERE id = ?").bind(mm[1]).first(); if (!c) return fail("Caso no encontrado.", 404);
+    const v = (k, d) => (b[k] !== undefined ? b[k] : d);
+    await env.DB.prepare("UPDATE amazon_cases SET title = ?, case_number = ?, kind = ?, due_date = ?, notes = ?, invoice_ids = ?, doc_ids = ?, status = ?, sent_at = ?, sent_to = ? WHERE id = ?")
+      .bind(v("title", c.title), v("case_number", c.case_number), v("kind", c.kind), b.due_date !== undefined ? isoDate(b.due_date) : c.due_date, v("notes", c.notes),
+        b.invoice_ids ? JSON.stringify(b.invoice_ids) : c.invoice_ids, b.doc_ids ? JSON.stringify(b.doc_ids) : c.doc_ids, st || c.status, b.sent_at !== undefined ? b.sent_at : c.sent_at, v("sent_to", c.sent_to), mm[1]).run();
+    return json({ ok: true });
+  }
+  if ((mm = p.match(/^\/cases\/([\w-]+)$/)) && m === "DELETE") { await env.DB.prepare("DELETE FROM amazon_cases WHERE id = ?").bind(mm[1]).run(); return json({ ok: true }); }
 
   // Accesos directos a herramientas externas (RevSeller, Keepa, Seller Central…)
   if (p === "/tools" && m === "GET") {
@@ -1258,10 +1299,12 @@ async function dailyDigest(env) {
   ]);
   await ensureCycles(env);
   const cardsDue = (await env.DB.prepare("SELECT cc.due_date, c.nickname, c.last4 FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.active = 1 AND cc.paid = 0 AND cc.due_date <= ? AND cc.closing_date <= ? ORDER BY cc.due_date").bind(in7, new Date().toISOString().slice(0, 10)).all()).results;
+  const cases = (await env.DB.prepare("SELECT title, case_number, due_date FROM amazon_cases WHERE status = 'abierto' AND due_date IS NOT NULL AND due_date <= ? ORDER BY due_date").bind(in7).all()).results;
   const tax = (await env.DB.prepare("SELECT tp.label, tp.due_date, o.name FROM tax_periods tp JOIN tax_obligations o ON o.id = tp.obligation_id WHERE o.active = 1 AND tp.status = 'pendiente' AND tp.due_date <= ? ORDER BY tp.due_date").bind(in30).all()).results;
   const today = new Date().toISOString().slice(0, 10);
   const lines = [
     ...tax.map((t) => `• ${t.due_date} — ${t.due_date < today ? "VENCIDA: " : ""}presentar ${t.name} (${t.label})`),
+    ...cases.map((c) => `• ${c.due_date} — responder a Amazon: ${c.title}${c.case_number ? " (caso " + c.case_number + ")" : ""}`),
     ...cardsDue.map((c) => `• ${c.due_date} — ${c.due_date < today ? "VENCIDO: " : ""}pagar el TOTAL de la tarjeta ${c.nickname} •••• ${c.last4} (no solo el mínimo)`),
     ...dls.results.map((d) => `• ${d.due_on} — ${d.title}${d.entity ? " (" + d.entity + ")" : ""}`),
     ...docs.results.map((d) => `• ${d.expires_on} — vence ${d.title} (${d.entity})`),

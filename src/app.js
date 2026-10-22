@@ -443,7 +443,7 @@ function docEditDialog(d) {
 async function pageBusiness(id, tab, q) {
   shell(loading(), "negocio-" + id);
   const [{ business: b, platforms, stats }, { suppliers }] = await Promise.all([api("/businesses/" + id), api("/suppliers?business=" + id)]);
-  const tabs = [["resumen", "Resumen"], ...(b.kind === "reventa" ? [["escaneo", "Hoja de escaneo"], ["lotes", "Lotes"]] : []), ["herramientas", "Herramientas"], ["proveedores", "Proveedores"], ["archivo", "Facturas y documentos"]];
+  const tabs = [["resumen", "Resumen"], ...(b.kind === "reventa" ? [["escaneo", "Hoja de escaneo"], ["lotes", "Lotes"], ["casos", "Casos de Amazon"]] : []), ["herramientas", "Herramientas"], ["proveedores", "Proveedores"], ["archivo", "Facturas y documentos"]];
   tab = tabs.some((t) => t[0] === tab) ? tab : "resumen";
   const st = STATUS_BIZ[b.status] || STATUS_BIZ.activo;
   const content = h("div", { class: "stack", style: "gap:18px" });
@@ -475,6 +475,8 @@ async function pageBusiness(id, tab, q) {
     content.append(await scanView(b));
   } else if (tab === "lotes") {
     content.append(await lotsView(b));
+  } else if (tab === "casos") {
+    content.append(await casesView(b, q.get("c")));
   } else {
     content.append(await archiveView(b, suppliers, null, q));
   }
@@ -828,6 +830,84 @@ function lotEditDialog(l) {
   modal("Editar " + l.name, () => h("div", { class: "stack" }, fld("Nombre", h("input", { name: "name", value: l.name, required: true })), fld("ID del envío a FBA", h("input", { name: "shipment_id", value: l.shipment_id || "" })), fld("Notas", h("input", { name: "notes", value: l.notes || "" })),
     h("button", { class: "btn danger sm", type: "button", style: "align-self:flex-start", onclick: () => confirmDelete("Eliminar lote", "Se borra el lote. Sus facturas y pagos no se borran: quedan sin lote.", async () => { await api("/lots/" + l.id, { method: "DELETE" }); toast("Lote eliminado."); route(); }) }, "Eliminar lote")),
   async (fd) => { await api("/lots/" + l.id, { method: "PUT", body: Object.fromEntries(fd) }); toast("Lote actualizado."); route(); });
+}
+// ---------- casos de Amazon ----------
+const CASE_KIND = { verificacion: "Verificación de la cuenta", aprobacion: "Aprobación de marca o categoría", autenticidad: "Queja de autenticidad o de estado", cadena: "Cadena de suministro / facturas", otro: "Otro" };
+const CASE_ST = { abierto: ["Abierto", "warn"], enviado: ["Enviado", "info"], resuelto: ["Resuelto", "ok"], rechazado: ["Rechazado", "bad"] };
+async function casesView(b, openId) {
+  if (openId) return await caseDetail(b, openId);
+  const { cases } = await api("/cases?business=" + b.id);
+  const today = new Date().toISOString().slice(0, 10);
+  return h("div", { class: "stack", style: "gap:18px" },
+    h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, "Cuando Amazon te pida soportes, abre un caso: eliges las facturas y la intranet arma el paquete con el soporte de pago de cada una y los documentos de la LLC. Todo queda registrado."),
+      h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => caseDialog(b) }, "+ Nuevo caso")),
+    cases.length ? h("div", { class: "list card" }, cases.map((c) => h("a", { href: `#/negocio/${b.id}/casos?c=${c.id}` },
+      h("span", { class: "stack", style: "gap:2px" }, h("b", { style: "color:var(--ink)" }, c.title), h("span", { class: "small muted" }, [c.case_number ? "Caso " + c.case_number : "", CASE_KIND[c.kind] || "", `${c.invoice_ids.length} factura${c.invoice_ids.length === 1 ? "" : "s"}`, c.sent_at ? "enviado " + fdate(c.sent_at) : ""].filter(Boolean).join(" · "))),
+      h("span", { class: "row", style: "gap:8px" }, c.due_date && c.status === "abierto" ? h("span", { class: "mono small", style: c.due_date < today ? "color:var(--bad);font-weight:700" : "color:var(--warn)" }, "Límite " + fdate(c.due_date)) : "", pill(...CASE_ST[c.status]))))) : h("section", { class: "card" }, h("p", { class: "empty" }, "No hay casos. Ábrelo cuando Amazon te pida facturas o documentos.")));
+}
+function caseDialog(b, c) {
+  modal(c ? "Editar caso" : "Nuevo caso de Amazon", () => h("div", { class: "stack" },
+    fld("Qué pide Amazon", h("input", { name: "title", required: true, value: c?.title || "", placeholder: "Por ejemplo: facturas para aprobar Milescraft" })),
+    h("div", { class: "fgrid" }, fld("Número de caso (si lo tiene)", h("input", { name: "case_number", value: c?.case_number || "" })),
+      fld("Tipo", h("select", { name: "kind" }, Object.entries(CASE_KIND).map(([k, l]) => h("option", { value: k, selected: c?.kind === k }, l)))),
+      fld("Fecha límite", h("input", { name: "due_date", type: "date", value: c?.due_date || "" }))),
+    fld("Notas (lo que dice el mensaje de Amazon)", h("textarea", { name: "notes", rows: "3" }, c?.notes || ""))),
+  async (fd) => {
+    const body = Object.fromEntries(fd); body.business_id = b.id;
+    if (c) { await api("/cases/" + c.id, { method: "PUT", body }); toast("Caso actualizado."); route(); }
+    else { const r = await api("/cases", { method: "POST", body }); toast("Caso creado. Ahora elige las facturas."); location.hash = `#/negocio/${b.id}/casos?c=${r.id}`; }
+  });
+}
+async function caseDetail(b, id) {
+  const [{ case: c, invoices }, { invoices: all }, docsRes] = await Promise.all([api("/cases/" + id), api("/invoices?business=" + b.id), api("/docs?entity=" + (b.entity_id || "llc")).catch(() => ({}))]);
+  const docs = Array.isArray(docsRes) ? docsRes : (Object.values(docsRes).find(Array.isArray) || []);
+  const latestDocs = docs.filter((d, i, arr) => d.file_id && arr.findIndex((x) => x.group_id === d.group_id) === i);
+  const ready = (inv) => inv.checks.some((x) => x.level === "bien" && /lo básico que pide Amazon/.test(x.text)) && inv.kind !== "recibo";
+  const save = async (patch, msg) => { await api("/cases/" + c.id, { method: "PUT", body: patch }); if (msg) toast(msg); route(); };
+  const pickInvoices = () => modal("Facturas del caso", () => {
+    const search = h("input", { type: "text", placeholder: "Buscar por proveedor, número o fecha", oninput: (e) => { const t = e.target.value.toLowerCase(); box.querySelectorAll("label").forEach((l) => { l.style.display = l.dataset.k.includes(t) ? "" : "none"; }); } });
+    const box = h("div", { class: "stack", style: "gap:4px;max-height:50vh;overflow:auto" }, all.map((i) => h("label", { class: "row", style: "gap:10px;padding:6px 4px;border-bottom:1px solid var(--line)", "data-k": [i.supplier, i.supplier_name, i.invoice_number, i.issue_date].join(" ").toLowerCase() },
+      h("input", { type: "checkbox", name: "inv", value: i.id, checked: c.invoice_ids.includes(i.id), style: "width:auto" }),
+      h("span", { class: "small" }, h("b", null, [i.supplier || i.supplier_name, i.invoice_number || i.title].filter(Boolean).join(" · ") || "Factura"), " · " + fdate(i.issue_date) + " · " + money(i.total, i.currency)))));
+    return h("div", { class: "stack" }, search, all.length ? box : h("p", { class: "empty" }, "No hay facturas en este negocio."));
+  }, async (fd) => save({ invoice_ids: fd.getAll("inv") }, "Facturas actualizadas."));
+  const docBoxes = latestDocs.map((d) => h("label", { class: "chip" }, h("input", { type: "checkbox", value: d.id, checked: c.doc_ids.includes(d.id), onchange: () => save({ doc_ids: docBoxes.map((l) => l.querySelector("input")).filter((x) => x.checked).map((x) => x.value) }) }), " " + d.title));
+  const readyN = invoices.filter(ready).length;
+  const send = async () => {
+    const { recipients } = await api("/recipients");
+    if (!recipients.length) { toast("Primero autoriza un correo en Accesos y ajustes.", true); return; }
+    modal("Enviar el paquete del caso", () => h("div", { class: "stack" },
+      fld("Enviar a", h("select", { name: "to" }, recipients.map((r) => h("option", { value: r.email }, (r.label ? r.label + " · " : "") + r.email)))),
+      h("p", { class: "small", style: "margin:0" }, `Van ${invoices.length} factura(s), el soporte de pago de cada una (tarjeta y estado de cuenta, si está subido) y ${c.doc_ids.length} documento(s) de la empresa. Te llega a tu correo para que lo revises y lo subas a Seller Central.`),
+      readyN < invoices.length ? h("p", { class: "small", style: "margin:0;color:var(--warn)" }, `${invoices.length - readyN} factura(s) no tienen todo lo que pide Amazon. Revísalas antes de presentarlas.`) : ""),
+    async (fd) => {
+      const r = await api("/send", { method: "POST", body: { to: fd.get("to"), subject: `Caso Amazon${c.case_number ? " " + c.case_number : ""}: ${c.title}`, invoice_ids: c.invoice_ids, doc_ids: c.doc_ids, with_payment: true } });
+      await api("/cases/" + c.id, { method: "PUT", body: { status: c.status === "abierto" ? "enviado" : c.status, sent_at: new Date().toISOString(), sent_to: fd.get("to") } });
+      toast(`Paquete enviado${r.emails > 1 ? ` en ${r.emails} correos` : ""}.` + (r.missing_proof?.length ? ` Falta el estado de cuenta de: ${r.missing_proof.join(", ")}.` : ""), !!r.missing_proof?.length); route();
+    }, "Enviar");
+  };
+  return h("div", { class: "stack", style: "gap:18px" },
+    h("nav", { class: "crumbs" }, h("a", { href: `#/negocio/${b.id}/casos` }, "Casos de Amazon"), "›", h("b", { style: "color:var(--ink)" }, c.title)),
+    h("section", { class: "card stack" },
+      h("div", { class: "row between", style: "align-items:flex-start" }, h("div", { class: "stack", style: "gap:4px" }, h("h2", null, c.title),
+          h("span", { class: "chips" }, pill(...CASE_ST[c.status]), c.case_number ? pill("Caso " + c.case_number) : "", c.kind ? pill(CASE_KIND[c.kind] || c.kind) : "", c.due_date ? pill("Límite " + fdate(c.due_date), c.due_date < new Date().toISOString().slice(0, 10) && c.status === "abierto" ? "bad" : "warn") : "")),
+        h("div", { class: "row" }, h("button", { class: "btn sm only-admin", type: "button", onclick: () => caseDialog(b, c) }, "Editar"),
+          h("select", { class: "only-admin", "aria-label": "Estado del caso", style: "width:auto", onchange: (e) => save({ status: e.target.value }, "Estado actualizado.") }, Object.entries(CASE_ST).map(([k, v]) => h("option", { value: k, selected: c.status === k }, v[0]))),
+          h("button", { class: "btn primary sm only-upload", type: "button", disabled: !invoices.length && !c.doc_ids.length, onclick: send }, c.sent_at ? "Enviar de nuevo" : "Enviar paquete a mi correo"))),
+      c.notes ? h("p", { class: "small", style: "margin:0;white-space:pre-wrap" }, c.notes) : "",
+      c.sent_at ? h("p", { class: "small muted", style: "margin:0" }, `Enviado el ${fdate(c.sent_at)} a ${c.sent_to || "tu correo"}.`) : ""),
+    h("section", { class: "card stack" },
+      h("div", { class: "row between" }, h("div", null, h("h2", null, "Facturas"), h("span", { class: "small muted" }, invoices.length ? `${readyN} de ${invoices.length} listas para Amazon` : "Elige las facturas que vas a presentar")),
+        h("button", { class: "btn sm only-admin", type: "button", onclick: pickInvoices }, invoices.length ? "Cambiar facturas" : "Elegir facturas")),
+      invoices.length ? h("div", { class: "list" }, invoices.map((i) => h("a", { href: "#/factura/" + i.id },
+        h("span", { class: "stack", style: "gap:2px" }, h("b", { style: "color:var(--ink)" }, [i.supplier, i.invoice_number || i.title].filter(Boolean).join(" · ") || "Factura"),
+          h("span", { class: "small muted" }, [fdate(i.issue_date), money(i.total, i.currency), i.card ? "pagada con " + i.card : "sin tarjeta asociada", i.card ? (i.proof ? "estado de cuenta listo" : "falta el estado de cuenta") : ""].filter(Boolean).join(" · ")),
+          !ready(i) ? h("span", { class: "small", style: "color:var(--warn)" }, (i.checks.find((x) => x.level !== "bien" && /Amazon/.test(x.text)) || i.checks.find((x) => x.level !== "bien") || {}).text || "") : ""),
+        pill(ready(i) ? "Lista" : "Revisar", ready(i) ? "ok" : "warn")))) : h("p", { class: "empty" }, "Todavía no hay facturas en este caso.")),
+    h("section", { class: "card stack" }, h("h2", null, "Documentos de la empresa que van en el paquete"),
+      latestDocs.length ? h("div", { class: "chips" }, docBoxes) : h("p", { class: "empty" }, "Sube el EIN, el certificado de reventa y los demás documentos en la página de la empresa."),
+      h("p", { class: "small muted", style: "margin:0" }, "Por ejemplo: EIN, certificado de reventa, Articles of Organization.")),
+    isAdmin() ? h("button", { class: "btn danger sm", type: "button", style: "align-self:flex-start", onclick: () => confirmDelete("Eliminar caso", "Se borra el registro del caso. Las facturas y los documentos no se tocan.", async () => { await api("/cases/" + c.id, { method: "DELETE" }); toast("Caso eliminado."); location.hash = `#/negocio/${b.id}/casos`; }) }, "Eliminar caso") : "");
 }
 async function pageSupplier(bid, sid, q) {
   shell(loading(), "negocio-" + bid);
