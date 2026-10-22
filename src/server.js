@@ -23,6 +23,7 @@ const MIGRATIONS = [
   "UPDATE money_moves SET kind = 'aporte' WHERE kind = 'transferencia' AND category = 'Aporte del dueño'",
   "ALTER TABLE subscriptions ADD COLUMN platform_ids TEXT NOT NULL DEFAULT '[]'",
   "ALTER TABLE invoices ADD COLUMN sub_id TEXT",
+  "UPDATE suppliers SET kind = 'Herramientas/Suscripciones', status = COALESCE(NULLIF(status,'investigar'), 'activo') WHERE id IN (SELECT supplier_id FROM invoices WHERE kind = 'suscripción' AND supplier_id IS NOT NULL) AND COALESCE(kind, 'Otro') = 'Otro'",
   "UPDATE subscriptions SET platform_ids = COALESCE((SELECT json_group_array(p.id) FROM platforms p WHERE p.business_id = subscriptions.business_id), '[]') WHERE business_id IS NOT NULL AND platform_ids = '[]'",
 ];
 const MOVE_KINDS = ["ingreso", "gasto", "retiro", "aporte", "transferencia"];
@@ -411,14 +412,16 @@ async function findOrCreateSupplier(env, inv, x) {
   const target = normName(name);
   const hit = pool.find((p) => normName(p.name) === target) || pool.find((p) => { const n = normName(p.name); return n.length >= 4 && target.length >= 4 && (n.includes(target) || target.includes(n)); });
   const v = (k) => (x && x[k]) || inv[k] || null;
+  const isTool = inv.kind === "suscripción";
   if (hit) {
+    if (isTool) await env.DB.prepare("UPDATE suppliers SET kind = 'Herramientas/Suscripciones', status = COALESCE(NULLIF(status,'investigar'), 'activo') WHERE id = ? AND COALESCE(kind, 'Otro') = 'Otro'").bind(hit.id).run();
     await env.DB.prepare("UPDATE suppliers SET email = COALESCE(NULLIF(email,''), ?), phone = COALESCE(NULLIF(phone,''), ?), website = COALESCE(NULLIF(website,''), ?), address = COALESCE(NULLIF(address,''), ?), tax_id = COALESCE(NULLIF(tax_id,''), ?) WHERE id = ?")
       .bind(v("supplier_email"), v("supplier_phone"), v("supplier_website"), v("supplier_address"), v("supplier_tax_id"), hit.id).run();
     return { id: hit.id, name: hit.name, created: false };
   }
   const id = uid();
-  await env.DB.prepare("INSERT INTO suppliers (id, business_id, name, kind, email, phone, website, address, tax_id, platforms, notes, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
-    .bind(id, inv.business_id, String(name).trim(), "Otro", v("supplier_email"), v("supplier_phone"), v("supplier_website"), v("supplier_address"), v("supplier_tax_id"), inv.platforms || "[]", "Creado automáticamente desde una factura.", now()).run();
+  await env.DB.prepare("INSERT INTO suppliers (id, business_id, name, kind, status, email, phone, website, address, tax_id, platforms, notes, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    .bind(id, inv.business_id, String(name).trim(), isTool ? "Herramientas/Suscripciones" : "Otro", isTool ? "activo" : null, v("supplier_email"), v("supplier_phone"), v("supplier_website"), v("supplier_address"), v("supplier_tax_id"), inv.platforms || "[]", "Creado automáticamente desde una factura.", now()).run();
   return { id, name: String(name).trim(), created: true };
 }
 async function backfillSuppliers(env) {

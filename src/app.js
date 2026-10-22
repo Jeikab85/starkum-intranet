@@ -629,7 +629,7 @@ function supplierDialog(target, s) {
   const sp = s?.platforms || [];
   modal(s ? "Editar " + s.name : "Agregar proveedor", () => h("div", { class: "stack" },
     h("div", { class: "fgrid" }, fld("Nombre", h("input", { name: "name", required: true, value: s?.name || "" })),
-      fld("Tipo", h("select", { name: "kind" }, ["Fabricante", "Distribuidor autorizado", "Mayorista", "Liquidación", "Arbitraje", "Otro"].map((k) => h("option", { selected: s?.kind === k }, k))))),
+      fld("Tipo", h("select", { name: "kind" }, ["Fabricante", "Distribuidor autorizado", "Mayorista", "Liquidación", "Arbitraje", TOOL_KIND, "Otro"].map((k) => h("option", { selected: s?.kind === k }, k))))),
     h("div", { class: "fgrid" }, fld("Estado", h("select", { name: "status" }, Object.entries(SUP_ST).map(([k, v]) => h("option", { value: k, selected: (s?.status || "investigar") === k }, v[0])))),
       fld("¿Permite vender en Amazon?", h("select", { name: "amazon_policy" }, h("option", { value: "" }, "Sin dato"), Object.entries(AMZ_POL).map(([k, v]) => h("option", { value: k, selected: s?.amazon_policy === k }, v[0])))),
       fld("Riesgo de bloqueo", h("select", { name: "risk" }, h("option", { value: "" }, "Sin dato"), ["bajo", "medio", "alto"].map((k) => h("option", { value: k, selected: s?.risk === k }, k[0].toUpperCase() + k.slice(1))))),
@@ -648,11 +648,13 @@ function supplierDialog(target, s) {
     toast("Proveedor guardado."); route();
   });
 }
+const TOOL_KIND = "Herramientas/Suscripciones";
 const SUP_ORDER = { listo: 0, contactado: 1, activo: 2, investigar: 3, no_enviar: 4, descartado: 5 };
 function suppliersList(b, suppliers, q, ctx = {}) {
   const base = ctx.base || `#/negocio/${b.id}`;
   const f = q?.get("f") || "activos";
-  const filters = [["activos", "En juego", (s) => s.status !== "descartado"], ["borrador", "Con borrador listo", (s) => s.draft_text && !["descartado", "no_enviar"].includes(s.status)],
+  const isTool = (s) => s.kind === TOOL_KIND;
+  const filters = [["activos", "En juego", (s) => s.status !== "descartado" && !isTool(s)], ["herramientas", "Herramientas y suscripciones", isTool], ["borrador", "Con borrador listo", (s) => s.draft_text && !["descartado", "no_enviar"].includes(s.status)],
     ["investigar", "Por investigar", (s) => (s.status || "investigar") === "investigar"], ["contactado", "Contactados", (s) => s.status === "contactado"], ["activo", "Cuenta abierta", (s) => s.status === "activo"],
     ["no_enviar", "No contactar aún", (s) => s.status === "no_enviar"], ["descartado", "Descartados", (s) => s.status === "descartado"], ["todos", "Todos", () => true]];
   const plat = q?.get("p") || "";
@@ -663,7 +665,7 @@ function suppliersList(b, suppliers, q, ctx = {}) {
     const t = e.target.value.toLowerCase(); grid.querySelectorAll("[data-k]").forEach((el) => { el.style.display = el.dataset.k.includes(t) ? "" : "none"; }); } });
   const grid = h("div", { class: "grid g3" }, list.map((s) => h("a", { class: "card bizcard", href: `${base}/proveedor/${s.id}`, "data-k": [s.name, s.brands, s.location, s.kind].join(" ").toLowerCase() },
     h("span", { class: "top" }, h("b", { style: "font-size:17px" }, s.contact_order && s.status !== "descartado" ? h("span", { class: "mono muted", title: "Orden de contacto sugerido por el Director" }, s.contact_order + ". ") : "", s.name), pill(...(SUP_ST[s.status || "investigar"]))),
-    h("span", { class: "chips" }, s.platforms.map((p) => pill(p, "info")), s.amazon_policy ? pill(...AMZ_POL[s.amazon_policy]) : "", s.risk ? pill(...RISK[s.risk]) : "", s.draft_text && s.status !== "descartado" ? pill("Borrador listo", "info") : ""),
+    h("span", { class: "chips" }, s.kind === TOOL_KIND ? pill("Herramienta / suscripción", "info") : "", s.platforms.map((p) => pill(p, "info")), s.amazon_policy ? pill(...AMZ_POL[s.amazon_policy]) : "", s.risk ? pill(...RISK[s.risk]) : "", s.draft_text && s.status !== "descartado" ? pill("Borrador listo", "info") : ""),
     h("span", { class: "small muted" }, [s.location, s.kind, s.priority ? "prioridad " + s.priority : "", s.used_in ? "facturas en " + s.used_in.split(",").join(", ") : ""].filter(Boolean).join(" · ")),
     s.director_note && s.status !== "descartado" ? h("span", { class: "small" }, "Condición: " + s.director_note) : "",
     s.invoices ? h("span", { class: "small" }, `${s.invoices} factura${s.invoices === 1 ? "" : "s"} · ${money(s.year_total)} este año`) : "")));
