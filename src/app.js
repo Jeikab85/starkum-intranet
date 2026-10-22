@@ -290,7 +290,7 @@ async function pageHome() {
   const { entities } = await api("/entities");
   state.entities = entities.map((e) => ({ ...e, ...(state.entities.find((x) => x.id === e.id) || {}), details: e.details }));
   const page = h("div", { class: "page chooser" },
-    h("div", { class: "chooserhead" }, logo("", 72), h("h1", null, "¿En qué empresa vas a trabajar?")),
+    h("div", { class: "chooserhead" }, logo("auto", 72), h("h1", null, "¿En qué empresa vas a trabajar?")),
     h("div", { class: "entpick" }, entities.map((e) => h("div", { class: "entwrap" }, h("a", { class: "entcard", href: "#/empresa/" + e.id },
       entityLogo(e, 96), h("span", { class: "stack", style: "gap:4px;align-items:center;text-align:center" }, h("b", { style: "font-size:22px" }, e.name), h("span", { class: "muted" }, e.country))),
       entityWeb(e)))));
