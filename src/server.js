@@ -590,6 +590,19 @@ async function api(req, env, url, user) {
       platforms: plats.results.filter((p) => !ent || !p.business_id || bizIds.has(p.business_id)), usage: { ...usage, free: STORAGE_FREE_BYTES } });
   }
 
+  let mm0;
+  // Logo de cada empresa (opcional; si no hay, la aplicación usa el ícono de Starkum)
+  if ((mm0 = p.match(/^\/entities\/(llc|sas)\/logo$/))) {
+    const key = "brand/entity-" + mm0[1];
+    if (m === "GET") { const o = await env.FILES.get(key); return o ? new Response(o.body, { headers: { "content-type": o.httpMetadata?.contentType || "image/png", "cache-control": "private, max-age=300" } }) : new Response("", { status: 404 }); }
+    if (m === "POST") {
+      const fd = await req.formData(); const f = fd.get("file");
+      if (!f || !f.size || f.size > 2 * 1024 * 1024 || !/^image\//.test(f.type)) return fail("Sube una imagen de hasta 2 MB.");
+      await env.FILES.put(key, await f.arrayBuffer(), { httpMetadata: { contentType: f.type } });
+      return json({ ok: true });
+    }
+    if (m === "DELETE") { await env.FILES.delete(key); return json({ ok: true }); }
+  }
   // Empresas
   if (p === "/entities") return json({ entities: (await env.DB.prepare("SELECT * FROM entities ORDER BY id").all()).results.map((e) => ({ ...e, details: JSON.parse(e.details || "{}") })), folders: FOLDERS });
   let mm;

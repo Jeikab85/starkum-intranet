@@ -38,6 +38,13 @@ function logo(tone, size = 40) {
   return h("span", { class: "logo " + (tone || ""), style: `width:${size}px;height:${Math.round(74 * k)}px`, "aria-hidden": "true" },
     h("img", { src: "/logo.png", alt: "", style: `width:${Math.round(300 * k)}px;height:${Math.round(163 * k)}px;left:${-Math.round(103 * k)}px;top:${-Math.round(25 * k)}px` }));
 }
+function entityLogo(e, size = 72) {
+  const box = h("span", { class: "entlogo", style: `width:${size}px;height:${size}px`, "aria-hidden": "true" });
+  const fallback = () => box.replaceChildren(logo("", Math.round(size * 0.78)));
+  const img = h("img", { src: `/api/entities/${e.id}/logo?v=${state.logoV || 0}`, alt: "", onerror: fallback });
+  box.append(img);
+  return box;
+}
 function pill(label, cls) { return h("span", { class: "pill " + (cls || "") }, label); }
 function toast(msg, err) {
   const t = h("div", { class: "toast" + (err ? " err" : ""), role: "status" }, msg);
@@ -108,9 +115,7 @@ function shell(content, active) {
         h("a", { href: "#/nuevo-negocio", class: "add only-admin" }, "+ Agregar negocio"),
         a("#/plataformas", "plataformas", "Plataformas"))
     ] : [
-      h("div", { class: "navgroup" }, a("#/", "inicio", "Elegir empresa")),
-      h("div", { class: "navgroup" }, h("span", { class: "label" }, "Empresas"), state.entities.map((e) => a("#/empresa/" + e.id, "empresa-" + e.id + "-inicio", e.name))),
-      h("div", { class: "navgroup" }, a("#/plataformas", "plataformas", "Plataformas"))
+      h("div", { class: "navgroup" }, a("#/", "inicio", "Elegir empresa"))
     ],
     h("div", { class: "navgroup" }, a("#/ajustes", "ajustes", "Accesos y ajustes")),
     h("div", { class: "who" }, h("b", null, state.user.name || "Mi cuenta"), h("span", null, state.user.email), h("span", null, ROLE_LABEL[state.user.role] || ""),
@@ -266,27 +271,12 @@ async function uploadInvoiceDialog(businessId, supplierId, suppliers, businesses
 async function pageHome() {
   setEntity(null);
   shell(loading(), "inicio");
-  const d = await api("/dashboard");
-  state.businesses = d.all_businesses; state.entities = d.entities;
-  const hour = Number(new Date().toLocaleString("en-US", { hour: "numeric", hour12: false, timeZone: "America/Chicago" }));
-  const hello = hour < 12 ? "Buenos días" : hour < 19 ? "Buenas tardes" : "Buenas noches";
-  const today = new Date().toLocaleDateString("es-US", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "America/Chicago" });
-  const pct = Math.min(100, (d.usage.bytes / d.usage.free) * 100);
-  const orphans = d.all_businesses.filter((b) => !b.entity_id);
-  const page = h("div", { class: "page" },
-    h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, today), h("h1", null, `${hello}${state.user.name && state.user.name !== "Administrador" ? ", " + state.user.name : ""}`)), searchBox()),
-    h("section", { class: "stack" }, h("h2", null, "¿En qué empresa vas a trabajar?"),
-      h("div", { class: "grid g2" }, d.entities.map((e) => {
-        const sm = e.summary || {}; const biz = d.all_businesses.filter((b) => b.entity_id === e.id);
-        return h("a", { class: "card entcard", href: "#/empresa/" + e.id },
-          h("span", { class: "row between" }, h("span", { class: "stack", style: "gap:2px" }, h("b", { style: "font-size:22px" }, e.name), h("span", { class: "small muted" }, e.country)), h("span", { class: "entgo", "aria-hidden": "true" }, "→")),
-          h("span", { class: "chips" }, biz.length ? biz.map((b) => h("span", { class: "chip" }, b.name)) : h("span", { class: "small muted" }, "Sin negocios todavía")),
-          h("span", { class: "row", style: "gap:8px" }, sm.overdue ? pill(`${sm.overdue} vencido${sm.overdue === 1 ? "" : "s"}`, "bad") : "", sm.upcoming ? pill(`${sm.upcoming} fecha${sm.upcoming === 1 ? "" : "s"} próxima${sm.upcoming === 1 ? "" : "s"}`, "warn") : pill("Al día", "ok"), e.issues ? pill(`${e.issues} documento${e.issues === 1 ? "" : "s"} por revisar`, "warn") : ""));
-      }))),
-    orphans.length ? h("section", { class: "card stack" }, h("h2", null, "Negocios sin empresa asignada"), h("p", { class: "small muted", style: "margin:0" }, "Asígnales una empresa para que aparezcan dentro de ella."),
-      h("div", { class: "list" }, orphans.map((b) => h("div", null, h("b", null, b.name), h("span", { class: "row", style: "gap:8px" }, h("a", { href: "#/negocio/" + b.id }, "Abrir"), h("button", { class: "linkbtn only-admin", type: "button", onclick: () => businessDialog(b) }, "Asignar empresa")))))) : "",
-    h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Almacenamiento"), h("span", { class: "small muted mono" }, `${bytes(d.usage.bytes)} de ${bytes(d.usage.free)} gratis · ${d.usage.n} archivos`)),
-      h("div", { class: "meter", role: "img", "aria-label": `Usado ${pct.toFixed(1)}%` }, h("i", { style: `width:${Math.max(pct, 0.5)}%` }))));
+  const { entities } = await api("/entities");
+  state.entities = entities.map((e) => ({ ...e, ...(state.entities.find((x) => x.id === e.id) || {}), details: e.details }));
+  const page = h("div", { class: "page chooser" },
+    h("div", { class: "chooserhead" }, logo("", 64), h("h1", null, "¿En qué empresa vas a trabajar?")),
+    h("div", { class: "entpick" }, entities.map((e) => h("a", { class: "entcard", href: "#/empresa/" + e.id },
+      entityLogo(e, 96), h("span", { class: "stack", style: "gap:4px;align-items:center;text-align:center" }, h("b", { style: "font-size:22px" }, e.name), h("span", { class: "muted" }, e.country))))));
   shell(page, "inicio");
 }
 async function companyHome(ent) {
@@ -351,9 +341,9 @@ async function pageEntity(id, tab, q) {
   const folder = folders.includes(q.get("carpeta")) ? q.get("carpeta") : folders[0];
   const inFolder = docs.filter((d) => d.folder === folder);
   const head = [
-    h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, "Empresa · " + ent.country), h("h1", null, ent.name)),
+    h("div", { class: "head" }, h("div", { class: "row", style: "gap:14px;align-items:center;flex-wrap:nowrap;min-width:0" }, entityLogo(ent, 56), h("div", { style: "min-width:0" }, h("span", { class: "eyebrow" }, "Empresa · " + ent.country), h("h1", null, ent.name))),
+      tab === "inicio" ? searchBox() : "",
       tab === "documentos" ? h("button", { class: "btn primary only-upload", type: "button", onclick: () => docDialog(id, folder) }, "Subir documento") : ""),
-    h("div", { class: "seg", role: "tablist", "aria-label": "Empresa" }, entities.map((e) => h("a", { href: `#/empresa/${e.id}/${tab}`, class: e.id === id ? "on" : "", role: "tab", "aria-selected": String(e.id === id) }, `${e.name} · ${e.country}`))),
     h("div", { class: "tabs", role: "tablist" }, ENT_TABS.map(([k, l]) => h("a", { href: `#/empresa/${id}/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
   if (tab !== "documentos") {
     const content = tab === "inicio" ? await companyHome(ent) : tab === "proveedores" ? await entitySuppliers(ent, q) : tab === "tarjetas" ? await cardsView(id) : await accountantView(ent, q);
@@ -361,7 +351,7 @@ async function pageEntity(id, tab, q) {
     return;
   }
   const page = h("div", { class: "page" }, ...head,
-    h("section", { class: "card" }, h("div", { class: "row between", style: "margin-bottom:10px" }, h("h2", null, "Datos de la empresa"), h("button", { class: "linkbtn only-admin", type: "button", onclick: () => entityDialog(ent) }, "Editar")),
+    h("section", { class: "card" }, h("div", { class: "row between", style: "margin-bottom:10px" }, h("h2", null, "Datos de la empresa"), h("span", { class: "row", style: "gap:14px" }, h("button", { class: "linkbtn only-admin", type: "button", onclick: () => logoDialog(ent) }, "Cambiar logo"), h("button", { class: "linkbtn only-admin", type: "button", onclick: () => entityDialog(ent) }, "Editar"))),
       h("div", { class: "kv" }, Object.entries(ent.details).map(([k, v]) => {
         const secret = /EIN|NIT|Cuenta/i.test(k) && v;
         const b = h("b", { class: secret ? "mono" : "" }, secret ? "•".repeat(Math.max(0, String(v).length - 4)) + String(v).slice(-4) : v || "—");
@@ -437,6 +427,11 @@ async function taxSection(entityId) {
     h("div", { class: "row between" }, h("div", null, h("h2", { id: "t-tax" }, "Declaraciones por período"), h("span", { class: "small muted" }, "Cada obligación con sus períodos, fechas límite, declaración y comprobante de pago")),
       h("button", { class: "btn sm only-admin", type: "button", onclick: add }, "+ Agregar obligación")),
     obligations.length ? obligations.map(card) : h("p", { class: "empty" }, entityId === "llc" ? "Sube en Fiscales la carta del Illinois Department of Revenue y la intranet crea la obligación y sus trimestres." : "Agrega aquí las obligaciones de la SAS, como IVA o retención en la fuente."));
+}
+function logoDialog(ent) {
+  modal("Logo de " + ent.name, () => h("div", { class: "stack" }, h("div", { class: "row", style: "gap:14px;align-items:center" }, entityLogo(ent, 72), h("p", { class: "small muted", style: "margin:0" }, "Se muestra en el inicio y dentro de la empresa. Mejor PNG cuadrado con fondo transparente, hasta 2 MB.")),
+    fld("Imagen", h("input", { name: "file", type: "file", accept: "image/png,image/jpeg,image/webp,image/svg+xml", required: true }))),
+  async (fd) => { const up = new FormData(); up.append("file", fd.get("file")); await api(`/entities/${ent.id}/logo`, { method: "POST", body: up }); state.logoV = Date.now(); toast("Logo actualizado."); route(); }, "Guardar logo");
 }
 function entityDialog(ent) {
   const rows = Object.entries(ent.details);
@@ -1391,7 +1386,10 @@ async function pageSettings() {
   const [{ users }, { recipients }, usage, { sends }] = await Promise.all([api("/users"), api("/recipients"), api("/usage"), api("/sends")]);
   const admin = state.user.role === "admin";
   const pct = Math.min(100, usage.bytes / usage.free * 100);
+  const orphans = state.businesses.filter((b) => !b.entity_id);
   const page = h("div", { class: "page" }, h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, "Configuración"), h("h1", null, "Accesos y ajustes"))),
+    orphans.length ? h("section", { class: "card stack" }, h("h2", null, "Negocios sin empresa asignada"), h("p", { class: "small muted", style: "margin:0" }, "No aparecen dentro de ninguna empresa hasta que les asignes una."),
+      h("div", { class: "list" }, orphans.map((b) => h("div", null, h("b", null, b.name), h("span", { class: "row", style: "gap:10px" }, h("a", { href: "#/negocio/" + b.id }, "Abrir"), h("button", { class: "linkbtn only-admin", type: "button", onclick: () => businessDialog(b) }, "Asignar empresa")))))) : "",
     h("div", { class: "grid g2" },
       h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Quién puede entrar"), admin ? h("button", { class: "btn sm", type: "button", onclick: () => modal("Dar acceso", () => h("div", { class: "stack" }, fld("Correo", h("input", { name: "email", type: "email", required: true })), fld("Nombre", h("input", { name: "name" })), fld("Rol", h("select", { name: "role" }, ["standard", "viewer", "admin"].map((r) => h("option", { value: r }, ROLE_LABEL[r])))),
           h("ul", { class: "small muted", style: "margin:0;padding-left:18px" }, ["admin", "standard", "viewer"].map((r) => h("li", null, h("b", null, ROLE_LABEL[r] + ": "), ROLE_HELP[r])))),
