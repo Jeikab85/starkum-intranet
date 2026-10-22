@@ -1,0 +1,33 @@
+# Configuración de producción de la intranet Starkum (velknoxiq.com).
+# Cloudflare la usa al publicar desde GitHub. Para pruebas locales: npm run dev
+name = "intranet"
+main = "dist/worker.js"
+compatibility_date = "2026-10-22"
+workers_dev = false
+
+routes = [{ pattern = "velknoxiq.com", custom_domain = true }]
+
+[vars]
+ADMIN_EMAIL = "contact@starkumholdings.com"
+MAIL_FROM = "intranet@velknoxiq.com"
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "intranet"
+database_id = "129494a0-14ca-4913-8712-98724d349de9"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "intranet-files"
+
+[[send_email]]
+name = "EMAIL"
+
+[triggers]
+crons = ["7 13 * * *"]
+
+[observability]
+enabled = true

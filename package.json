@@ -1,0 +1,16 @@
+{
+  "name": "starkum-intranet",
+  "version": "1.0.0",
+  "description": "Intranet privada de Starkum Holdings (velknoxiq.com) — Cloudflare Worker",
+  "main": "dist/worker.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --dev && wrangler dev -c wrangler.dev.toml --local --port 8787",
+    "deploy": "node build.mjs && wrangler deploy"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "wrangler": "^4.151.3"
+  },
+  "private": true
+}
