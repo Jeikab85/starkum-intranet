@@ -15,7 +15,7 @@ Servicios de Cloudflare que usa: D1 (`DB`), R2 (`FILES`, bucket `intranet-files`
 
 ## Publicar
 
-Cada cambio que llega a la rama `main` se publica solo en velknoxiq.com con Cloudflare Workers Builds:
+Cada cambio que llega a la rama `main` se publica solo en velknoxiq.com con Cloudflare Workers Builds (las vistas previas de otras ramas están desactivadas para no tocar la base de datos de producción):
 
 - Comando de compilación: `npm ci && npm run build`
 - Comando de publicación: `npx wrangler deploy`
