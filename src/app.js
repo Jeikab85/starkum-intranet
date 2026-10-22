@@ -33,14 +33,19 @@ const fdate = (d) => { if (!d) return "—"; const [y, m, dd] = d.slice(0, 10).s
 const bytes = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(0) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(2) + " GB";
 const ext = (f) => (f || "").split(".").pop().toUpperCase().slice(0, 4) || "ARCH";
 // El PNG del sitio trae margen y el texto "STARKUM HOLDINGS LLC" debajo: se recorta solo el ícono (x 103–197, y 25–99 de 300×163)
+// Emblema Starkum (Holdings y Group unidos por una órbita). En fondos oscuros va sobre una placa clara.
 function logo(tone, size = 40) {
+  return h("span", { class: "emblem " + (tone || ""), "aria-hidden": "true" },
+    h("img", { src: "/brand/emblem.svg", alt: "", style: `height:${size}px;width:${Math.round(size * 200 / 110)}px` }));
+}
+function holdingsIcon(tone, size = 40) {
   const k = size / 94;
   return h("span", { class: "logo " + (tone || ""), style: `width:${size}px;height:${Math.round(74 * k)}px`, "aria-hidden": "true" },
     h("img", { src: "/logo.png", alt: "", style: `width:${Math.round(300 * k)}px;height:${Math.round(163 * k)}px;left:${-Math.round(103 * k)}px;top:${-Math.round(25 * k)}px` }));
 }
 function entityLogo(e, size = 72) {
   const box = h("span", { class: "entlogo", style: `width:${size}px;height:${size}px`, "aria-hidden": "true" });
-  const fallback = () => box.replaceChildren(logo("", Math.round(size * 0.78)));
+  const fallback = () => box.replaceChildren(holdingsIcon("", Math.round(size * 0.78)));
   const img = h("img", { src: `/api/entities/${e.id}/logo?v=${state.logoV || 0}`, alt: "", onerror: fallback });
   box.append(img);
   return box;
@@ -86,7 +91,7 @@ function renderLogin(stepEmail) {
   if (!stepEmail) {
     const email = h("input", { id: "login-email", type: "email", autocomplete: "email", required: true, placeholder: "tucorreo@starkumholdings.com" });
     const btn = h("button", { class: "btn primary", type: "submit" }, "Enviarme un código");
-    box.append(h("div", { class: "mark" }, logo("auto", 46), h("span", null, "Starkum Holdings")), h("h1", null, "Entrar a la intranet"),
+    box.append(h("div", { class: "mark" }, logo("auto", 44), h("span", null, "Starkum")), h("h1", null, "Entrar a la intranet"),
       h("p", { class: "muted", style: "margin:0" }, "Escribe tu correo de Starkum. Te enviaremos un código de un solo uso."),
       h("form", { class: "stack", onsubmit: (e) => { e.preventDefault(); busy(btn, async () => { await api("/auth/request", { method: "POST", body: { email: email.value } }); renderLogin(email.value.trim().toLowerCase()); }); } },
         h("label", { class: "field", for: "login-email" }, "Correo", email), btn));
@@ -94,7 +99,7 @@ function renderLogin(stepEmail) {
   } else {
     const code = h("input", { id: "login-code", inputmode: "numeric", autocomplete: "one-time-code", maxlength: "6", pattern: "[0-9]{6}", required: true, placeholder: "000000", style: "font-family:var(--f-m);font-size:24px;letter-spacing:8px;text-align:center" });
     const btn = h("button", { class: "btn primary", type: "submit" }, "Entrar");
-    box.append(h("div", { class: "mark" }, logo("auto", 46), h("span", null, "Starkum Holdings")), h("h1", null, "Revisa tu correo"),
+    box.append(h("div", { class: "mark" }, logo("auto", 44), h("span", null, "Starkum")), h("h1", null, "Revisa tu correo"),
       h("p", { class: "muted", style: "margin:0" }, "Si ", h("b", null, stepEmail), " tiene acceso, le llegó un código de 6 dígitos. Vence en 10 minutos."),
       h("form", { class: "stack", onsubmit: (e) => { e.preventDefault(); busy(btn, async () => { await api("/auth/verify", { method: "POST", body: { email: stepEmail, code: code.value } }); await boot(); }); } },
         h("label", { class: "field", for: "login-code" }, "Código", code), btn,
@@ -109,7 +114,7 @@ function shell(content, active) {
   const ent = state.entities.find((e) => e.id === state.entity);
   const a = (href, key, label, cls = "") => h("a", { href, class: (active === key ? "on " : "") + cls }, label);
   const nav = h("nav", { class: "side", id: "side", "aria-label": "Menú principal" },
-    h("a", { class: "brand", href: "#/" }, logo("light", 38), h("span", { class: "brandtext" }, h("b", null, "Starkum Holdings"), h("span", null, "Intranet"))),
+    h("a", { class: "brand", href: "#/" }, logo("light", 30), h("span", { class: "brandtext" }, h("b", null, "Starkum"), h("span", null, "Intranet"))),
     ent ? [
       h("div", { class: "navgroup" }, h("span", { class: "label" }, "Empresa"),
         h("a", { href: "#/", class: "entswitch", title: "Volver a elegir empresa" }, h("b", null, ent.name), h("span", null, "Cambiar de empresa")),
@@ -130,7 +135,7 @@ function shell(content, active) {
     h("div", { class: "who" }, h("b", null, state.user.name || "Mi cuenta"), h("span", null, state.user.email), h("span", null, ROLE_LABEL[state.user.role] || ""),
       h("button", { type: "button", onclick: async () => { await api("/auth/logout", { method: "POST" }); state.user = null; renderLogin(); } }, "Cerrar sesión")));
   nav.addEventListener("click", (e) => { if (e.target.tagName === "A") nav.classList.remove("open"); });
-  const top = h("div", { class: "topbar" }, h("span", { class: "row", style: "gap:8px" }, logo("light", 28), h("b", null, "Starkum Holdings")), h("button", { type: "button", "aria-controls": "side", onclick: () => nav.classList.toggle("open") }, "Menú"));
+  const top = h("div", { class: "topbar" }, h("span", { class: "row", style: "gap:8px" }, logo("light", 22), h("b", null, "Starkum")), h("button", { type: "button", "aria-controls": "side", onclick: () => nav.classList.toggle("open") }, "Menú"));
   $root.replaceChildren(h("div", { class: "app" }, nav, h("div", { style: "flex:1;min-width:0" }, top, h("main", { id: "main" }, content))));
   window.scrollTo(0, 0);
 }
@@ -285,7 +290,7 @@ async function pageHome() {
   const { entities } = await api("/entities");
   state.entities = entities.map((e) => ({ ...e, ...(state.entities.find((x) => x.id === e.id) || {}), details: e.details }));
   const page = h("div", { class: "page chooser" },
-    h("div", { class: "chooserhead" }, logo("", 64), h("h1", null, "¿En qué empresa vas a trabajar?")),
+    h("div", { class: "chooserhead" }, logo("", 72), h("h1", null, "¿En qué empresa vas a trabajar?")),
     h("div", { class: "entpick" }, entities.map((e) => h("div", { class: "entwrap" }, h("a", { class: "entcard", href: "#/empresa/" + e.id },
       entityLogo(e, 96), h("span", { class: "stack", style: "gap:4px;align-items:center;text-align:center" }, h("b", { style: "font-size:22px" }, e.name), h("span", { class: "muted" }, e.country))),
       entityWeb(e)))));

@@ -6,8 +6,9 @@
 <meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#13262E">
 <title>Intranet Starkum</title>
-<link rel="icon" type="image/png" href="/logo.png">
-<link rel="apple-touch-icon" href="/logo.png">
+<link rel="icon" type="image/svg+xml" href="/brand/emblem.svg">
+<link rel="alternate icon" type="image/png" href="/logo.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Manrope:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
@@ -39,6 +40,9 @@ h1{font-size:clamp(26px,3.2vw,34px)} h2{font-size:18px} h3{font-size:16px}
 .brandtext{display:flex;flex-direction:column;line-height:1.15}
 .brandtext b{font-family:var(--f-d);font-size:18px;color:#fff}
 .brandtext span{font-family:var(--f-m);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:#9FB6BE;margin-top:3px}
+.emblem{display:inline-flex;flex:none;line-height:0}.emblem img{display:block}
+.emblem.light{background:linear-gradient(180deg,#fff,#eef2f1);border-radius:10px;padding:3px 6px}
+@media (prefers-color-scheme: dark){.emblem.auto{background:linear-gradient(180deg,#fff,#eef2f1);border-radius:10px;padding:3px 6px}}
 .logo{position:relative;overflow:hidden;display:inline-block;flex:none}
 .logo img{position:absolute;max-width:none}
 .logo.light img{filter:brightness(0) invert(1)}

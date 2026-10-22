@@ -828,6 +828,14 @@ async function api(req, env, url, user) {
     }
     if (m === "DELETE") { await env.FILES.delete(key); return json({ ok: true }); }
   }
+  // Ícono PNG de la intranet para el celular (se genera en el navegador a partir del emblema)
+  if (p === "/brand/app-icon" && m === "POST") {
+    if (!isAdmin) return fail("Solo el administrador.", 403);
+    const fd = await req.formData(); const f = fd.get("file");
+    if (!f || !f.size || f.size > 1024 * 1024 || f.type !== "image/png") return fail("Sube un PNG de hasta 1 MB.");
+    await env.FILES.put("brand/app-icon.png", await f.arrayBuffer(), { httpMetadata: { contentType: "image/png" } });
+    return json({ ok: true });
+  }
   // Empresas
   if (p === "/entities") return json({ entities: (await env.DB.prepare("SELECT * FROM entities ORDER BY id").all()).results.map((e) => ({ ...e, details: JSON.parse(e.details || "{}") })), folders: FOLDERS });
   let mm;
@@ -1899,6 +1907,47 @@ async function dailyDigest(env) {
 }
 
 // ---------- logo ----------
+// ---------- emblema Starkum: Holdings y Group unidos por una órbita (vector) ----------
+const LLC_ICON_URL = "https://starkumholdings.com/wp-content/uploads/2026/08/starkum-icon-final_1.png";
+async function brandSource(env, key, src) {
+  const o = await env.FILES.get(key);
+  if (o) return { buf: await o.arrayBuffer(), type: o.httpMetadata?.contentType || "image/png" };
+  const r = await fetch(src);
+  if (!r.ok) throw new Error("No se pudo cargar " + src);
+  const buf = await r.arrayBuffer(); const type = r.headers.get("content-type") || "image/png";
+  await env.FILES.put(key, buf, { httpMetadata: { contentType: type } });
+  return { buf, type };
+}
+let emblemSvg = null;
+async function serveEmblem(env) {
+  if (!emblemSvg) {
+    const [l, g] = await Promise.all([brandSource(env, "brand/src-llc-icon", LLC_ICON_URL), brandSource(env, "brand/src-sas-icon", SAS_LOGO_URL)]);
+    const uri = (x) => `data:${x.type};base64,${b64(new Uint8Array(x.buf))}`;
+    emblemSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 110" width="200" height="110">
+<defs>
+<linearGradient id="bk" x1="0" x2="1"><stop offset="0" stop-color="#9aa5ac"/><stop offset=".5" stop-color="#8fa69a"/><stop offset="1" stop-color="#7fa592"/></linearGradient>
+<linearGradient id="fr" x1="0" x2="1"><stop offset="0" stop-color="#3e474e"/><stop offset=".2" stop-color="#a3adb3"/><stop offset=".48" stop-color="#56636a"/><stop offset=".78" stop-color="#5b8f74"/><stop offset="1" stop-color="#2b5843"/></linearGradient>
+<linearGradient id="hl" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".35" stop-color="#fff" stop-opacity=".8"/><stop offset=".65" stop-color="#fff" stop-opacity=".6"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+<radialGradient id="sh" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#1c2a30" stop-opacity=".2"/><stop offset="1" stop-color="#1c2a30" stop-opacity="0"/></radialGradient>
+</defs>
+<ellipse cx="100" cy="92" rx="70" ry="7" fill="url(#sh)"/>
+<g transform="rotate(-11 100 56)"><path d="M17 54 A83 27 0 0 1 183 54" fill="none" stroke="url(#bk)" stroke-width="2.2" stroke-linecap="round" opacity=".85"/></g>
+<image href="${uri(l)}" x="26" y="31" width="64" height="51"/>
+<image href="${uri(g)}" x="108" y="10" width="68" height="79"/>
+<g transform="rotate(-11 100 56)">
+<path d="M183 54 A83 27 0 0 1 17 54 A83 33.5 0 0 0 183 54 Z" fill="url(#fr)"/>
+<path d="M168 66 A83 30 0 0 1 32 66" fill="none" stroke="url(#hl)" stroke-width=".9" stroke-linecap="round"/>
+<path d="M17 54 l-6.5 1.2 L17.5 40 L23.5 56.2 Z" fill="#59636a"/>
+<path d="M183 54 l6.5 -1.2 L182.5 68 L176.5 51.8 Z" fill="#2b5843"/>
+</g></svg>`;
+  }
+  return new Response(emblemSvg, { headers: { "content-type": "image/svg+xml; charset=utf-8", "cache-control": "public, max-age=86400", "x-content-type-options": "nosniff" } });
+}
+async function serveAppIcon(env) {
+  const o = await env.FILES.get("brand/app-icon.png");
+  if (!o) return serveLogo(env);
+  return new Response(o.body, { headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" } });
+}
 async function serveLogo(env) {
   let obj = await env.FILES.get("brand/logo.png");
   if (!obj) {
@@ -1924,6 +1973,8 @@ export default {
     try {
       await ensureSchema(env);
       if (url.pathname === "/logo.png") return await serveLogo(env);
+      if (url.pathname === "/brand/emblem.svg") return await serveEmblem(env);
+      if (url.pathname === "/apple-touch-icon.png") return await serveAppIcon(env);
       if (url.pathname.startsWith("/api/")) {
         if (req.method !== "GET" && req.headers.get("origin") && new URL(req.headers.get("origin")).host !== url.host) return fail("Origen no permitido.", 403);
         const auth = await authRoutes(req, env, url);
