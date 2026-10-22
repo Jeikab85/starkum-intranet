@@ -1319,23 +1319,27 @@ function bankFromPdf(textLines, { credit, dmy }) {
   const year = +end.slice(0, 4), endMonth = +end.slice(5, 7);
   const DATE = /^(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|[A-Za-z]{3}\.? \d{1,2}(?:,? \d{4})?|\d{1,2} [A-Za-z]{3}\.?(?: \d{4})?)\s+/;
   const AMT = /\(?-?\$?\s?\d{1,3}(?:,\d{3})*\.\d{2}\)?(?:\s?(?:-|CR)(?=\s|$))?/g;
-  let section = null; const lines = [];
+  let section = null, sectionName = ""; const lines = [];
   for (const raw of textLines) {
     const ln = raw.trim();
     const m = ln.match(DATE);
     if (!m) {
-      if (/^(payments?|credits?|deposits?|other additions|abonos|cr[ée]ditos|electronic deposits)/i.test(ln) || /payments and (other )?credits|deposits and (other )?(additions|credits)/i.test(ln)) section = "in";
+      if (/^[A-Z][A-Za-z ]{3,40}$/.test(ln) && !/balance|summary|total|page|date|amount|number|fecha|monto/i.test(ln)) sectionName = ln;
+      if (/(balance summary|daily (ending )?balance|resumen de saldos|saldo diario)/i.test(ln)) { section = "skip"; continue; }
+      if (/^(customer deposits|payments?|credits?|deposits?|other additions|abonos|cr[ée]ditos|electronic deposits)/i.test(ln) || /payments and (other )?credits|deposits and (other )?(additions|credits)/i.test(ln)) section = "in";
       else if (/^(purchases?|charges?|withdrawals?|debits?|other subtractions|card transactions|checks|fees|cargos|retiros|compras)/i.test(ln) || /purchases and (other )?(charges|debits)|withdrawals and (other )?(subtractions|debits)/i.test(ln)) section = "out";
       continue;
     }
+    if (section === "skip") continue;
     const d = parseAnyDate(m[1], { dmy, year, endMonth }); if (!d) continue;
     let rest = ln.slice(m[0].length);
     const m2 = rest.match(DATE); if (m2) rest = rest.slice(m2[0].length);
     const amts = [...rest.matchAll(AMT)];
     if (!amts.length) continue;
     const first = amts[0];
-    let desc = rest.slice(0, first.index).replace(/^\d{4,}\s+/, "").replace(/\s+/g, " ").trim();
-    if (!desc || /balance|saldo|^total|minimum payment|pago m[íi]nimo/i.test(desc)) continue;
+    let desc = rest.slice(0, first.index).replace(/^\d{4,}\s*/, "").replace(/\s+/g, " ").trim();
+    if (/balance|saldo|^total|minimum payment|pago m[íi]nimo/i.test(desc)) continue;
+    if (!desc) desc = sectionName || (section === "in" ? "Depósito" : "Cargo");
     const tok = first[0]; const v = Math.abs(parseMoney(tok) || 0); if (!v) continue;
     const neg = /^\(|^-|-$|CR$|\$\s?-/.test(tok.trim()) || /^-/.test(tok.replace("$", ""));
     let inflow;

@@ -1104,7 +1104,7 @@ async function api(req, env, url, user) {
   if (p === "/bank/read" && m === "POST") {
     const b = await body();
     const x = await readBank(env, { text: b.text, image: b.image });
-    const lines = (x.lines || []).map((l) => ({ posted_on: isoDate(l.date), description: String(l.description || "").replace(/\d{9,}/g, (d) => "•••• " + d.slice(-4)).slice(0, 200), amount: Math.abs(num(l.amount) || 0) * (l.direction === "entra" ? 1 : -1) })).filter((l) => l.posted_on && l.amount);
+    const lines = (x.lines || []).map((l) => ({ posted_on: isoDate(l.date), description: String(l.description || (l.direction === "entra" ? "Depósito" : "Cargo")).replace(/\d{9,}/g, (d) => "•••• " + d.slice(-4)).slice(0, 200), amount: Math.abs(num(l.amount) || 0) * (l.direction === "entra" ? 1 : -1) })).filter((l) => l.posted_on && l.amount);
     return json({ period_end: x.period_end, lines });
   }
   if (p === "/bank/lines" && m === "POST") {
