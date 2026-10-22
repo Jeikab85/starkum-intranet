@@ -239,7 +239,7 @@ const normRole = (r) => (r === "member" ? "standard" : ROLES.includes(r) ? r : "
 const STANDARD_WRITES = [
   ["POST", /^\/invoices$/], ["POST", /^\/invoices\/[\w-]+\/extract$/], ["PUT", /^\/invoices\/[\w-]+$/],
   ["POST", /^\/docs$/], ["POST", /^\/docs\/[\w-]+\/extract$/], ["POST", /^\/tax\/periods\/[\w-]+\/file$/], ["POST", /^\/records$/], ["POST", /^\/send$/], ["POST", /^\/scan\/logs$/], ["POST", /^\/lots$/], ["POST", /^\/moves$/],
-  ["POST", /^\/subs$/], ["POST", /^\/bank\/read$/], ["POST", /^\/bank\/lines$/], ["POST", /^\/settlements$/],
+  ["POST", /^\/bank\/read$/], ["POST", /^\/bank\/lines$/], ["POST", /^\/settlements$/],
 ];
 function permissionError(role, method, path) {
   if (method === "GET" || path === "/auth/logout" || role === "admin") return null;
@@ -1557,7 +1557,7 @@ async function api(req, env, url, user) {
         .bind(inv.supplier_email, inv.supplier_phone, inv.supplier_website, inv.supplier_address, inv.supplier_tax_id, inv.supplier_id).run();
     }
     let subFilled = false;
-    if (b.confirm && inv.sub_id && num(inv.total) > 0) {
+    if (isAdmin && b.confirm && inv.sub_id && num(inv.total) > 0) {
       const sub = await env.DB.prepare("SELECT * FROM subscriptions WHERE id = ?").bind(inv.sub_id).first();
       if (sub && sub.cycle !== "gratis" && (!(sub.amount > 0) || !sub.charge_date)) {
         await env.DB.prepare("UPDATE subscriptions SET amount = ?, currency = ?, charge_date = COALESCE(NULLIF(charge_date,''), ?), card_id = COALESCE(card_id, ?) WHERE id = ?").bind(num(inv.total), inv.currency || "USD", inv.issue_date || "", inv.card_id || null, sub.id).run();

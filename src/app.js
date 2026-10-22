@@ -1200,7 +1200,7 @@ async function subsView(ent, biz, q) {
     h("td", { class: "only-admin" }, h("button", { class: "linkbtn small", type: "button", onclick: () => subDialog(s, ent, cards, platforms) }, s.pending ? "Completar" : "Editar")));
   return h("div", { class: "stack", style: "gap:16px" },
     h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, biz ? `Las herramientas que usas en ${biz.name}. Si una también la usas en otra plataforma, es el mismo registro: se cobra una sola vez.` : "Cada herramienta es un solo registro aunque la uses en varias plataformas, así el cobro no se duplica. Cada cobro sale en el paquete del contador y se compara con el estado de cuenta."),
-      h("button", { class: "btn primary sm only-upload", type: "button", onclick: () => subDialog(null, ent, cards, platforms, plat && plat !== "general" ? plat : biz ? platforms.filter((p) => p.business_id === biz.id).map((p) => p.id)[0] : "") }, "+ Agregar herramienta")),
+      h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => subDialog(null, ent, cards, platforms, plat && plat !== "general" ? plat : biz ? platforms.filter((p) => p.business_id === biz.id).map((p) => p.id)[0] : "") }, "+ Agregar herramienta")),
     filt,
     h("div", { class: "grid g4" }, stat("Con cobro activo", act.length), ...curs.flatMap((c) => [stat("Al mes" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.m || 0, c)), stat("Al año" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.y || 0, c))]), stat("Por completar", pend)),
     shown.length ? h("section", { class: "card stack" },
