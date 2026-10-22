@@ -109,6 +109,7 @@ function shell(content, active) {
         a(`#/empresa/${ent.id}/documentos`, `empresa-${ent.id}-documentos`, "Documentos"),
         a(`#/empresa/${ent.id}/proveedores`, `empresa-${ent.id}-proveedores`, "Proveedores"),
         a(`#/empresa/${ent.id}/tarjetas`, `empresa-${ent.id}-tarjetas`, "Tarjetas"),
+        a(`#/empresa/${ent.id}/suscripciones`, `empresa-${ent.id}-suscripciones`, "Suscripciones"),
         a(`#/empresa/${ent.id}/contador`, `empresa-${ent.id}-contador`, "Para el contador")),
       h("div", { class: "navgroup" }, h("span", { class: "label" }, "Negocios"),
         state.businesses.filter((b) => b.entity_id === ent.id).map((b) => a("#/negocio/" + b.id, "negocio-" + b.id, b.name)),
@@ -330,7 +331,7 @@ function addDeadline() {
   async (fd) => { await api("/deadlines", { method: "POST", body: Object.fromEntries(fd) }); toast("Fecha agregada."); route(); });
 }
 
-const ENT_TABS = [["inicio", "Inicio"], ["documentos", "Documentos"], ["proveedores", "Proveedores"], ["tarjetas", "Tarjetas"], ["contador", "Para el contador"]];
+const ENT_TABS = [["inicio", "Inicio"], ["documentos", "Documentos"], ["proveedores", "Proveedores"], ["tarjetas", "Tarjetas"], ["suscripciones", "Suscripciones"], ["contador", "Para el contador"]];
 async function pageEntity(id, tab, q) {
   tab = ENT_TABS.some((t) => t[0] === tab) ? tab : "inicio";
   setEntity(id);
@@ -346,7 +347,7 @@ async function pageEntity(id, tab, q) {
       tab === "documentos" ? h("button", { class: "btn primary only-upload", type: "button", onclick: () => docDialog(id, folder) }, "Subir documento") : ""),
     h("div", { class: "tabs", role: "tablist" }, ENT_TABS.map(([k, l]) => h("a", { href: `#/empresa/${id}/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
   if (tab !== "documentos") {
-    const content = tab === "inicio" ? await companyHome(ent) : tab === "proveedores" ? await entitySuppliers(ent, q) : tab === "tarjetas" ? await cardsView(id) : await accountantView(ent, q);
+    const content = tab === "inicio" ? await companyHome(ent) : tab === "proveedores" ? await entitySuppliers(ent, q) : tab === "tarjetas" ? await cardsView(id) : tab === "suscripciones" ? await subsView(ent, null, q) : await accountantView(ent, q);
     shell(h("div", { class: "page" }, ...head, content), act);
     return;
   }
@@ -492,7 +493,7 @@ async function pageBusiness(id, tab, q) {
   if (b.entity_id) setEntity(b.entity_id);
   const platNames = platforms.map((p) => p.name);
   const mySuppliers = suppliers.filter((s) => s.business_id === b.id || s.invoices > 0 || s.platforms.some((p) => platNames.includes(p)));
-  const tabs = [["resumen", "Resumen"], ...(b.kind === "reventa" ? [["escaneo", "Hoja de escaneo"], ["lotes", "Lotes"], ["inventario", "Inventario"], ["casos", "Casos de Amazon"], ["aprobaciones", "Aprobaciones de marca"]] : []), ["herramientas", "Herramientas"], ["proveedores", "Proveedores"], ["archivo", "Facturas y documentos"]];
+  const tabs = [["resumen", "Resumen"], ...(b.kind === "reventa" ? [["escaneo", "Hoja de escaneo"], ["lotes", "Lotes"], ["inventario", "Inventario"], ["casos", "Casos de Amazon"], ["aprobaciones", "Aprobaciones de marca"]] : []), ["herramientas", "Herramientas"], ["suscripciones", "Suscripciones"], ["proveedores", "Proveedores"], ["archivo", "Facturas y documentos"]];
   tab = tabs.some((t) => t[0] === tab) ? tab : "resumen";
   const st = STATUS_BIZ[b.status] || STATUS_BIZ.activo;
   const content = h("div", { class: "stack", style: "gap:18px" });
@@ -521,6 +522,9 @@ async function pageBusiness(id, tab, q) {
   } else if (tab === "proveedores") {
     const names = platNames;
     content.append(suppliersList(b, mySuppliers, q, { note: h("span", { class: "small muted" }, "Solo los que surten ", names.join(" o ") || b.name, ". Todos los de la empresa están en ", h("a", { href: `#/empresa/${b.entity_id || "llc"}/proveedores` }, (b.entity_name || "la empresa") + " › Proveedores"), ".") }));
+  } else if (tab === "suscripciones") {
+    const ent = state.entities.find((e) => e.id === b.entity_id);
+    content.append(ent ? await subsView(ent, b) : h("section", { class: "card" }, h("p", { class: "empty" }, "Asigna este negocio a una empresa (en Editar negocio) para registrar sus suscripciones.")));
   } else if (tab === "escaneo") {
     content.append(await scanView(b));
   } else if (tab === "lotes") {
@@ -778,7 +782,7 @@ async function cardsView(entityId) {
           h("td", null, x.file_id ? h("a", { href: "/api/files/" + x.file_id, target: "_blank", rel: "noopener" }, "Ver") : h("span", { class: "muted small" }, "—")),
           h("td", { class: "only-admin" }, h("span", { class: "row", style: "gap:6px" },
             !debit && x.closing_date <= today && !(x.paid && !x.paid_on && x.due_date < c.created_at.slice(0, 10)) ? h("button", { class: "linkbtn small", type: "button", onclick: async () => { await api("/cards/cycles/" + x.id, { method: "PUT", body: { paid: !x.paid } }); toast(x.paid ? "Marcada como no pagada." : "Pago registrado."); route(); } }, x.paid ? "Desmarcar" : "Marcar pagada (total)") : "",
-            h("button", { class: "linkbtn small", type: "button", onclick: () => statementDialog(c, x) }, x.file_id ? "Cambiar archivo" : debit ? "Subir extracto" : "Subir estado de cuenta")))))))) : "");
+            h("button", { class: "linkbtn small", type: "button", onclick: () => statementDialog(c, x, entityId) }, x.file_id ? "Cambiar archivo" : debit ? "Subir extracto" : "Subir estado de cuenta")))))))) : "");
   };
   const info = (c) => {
     const debit = c.card_type === "debito";
@@ -844,15 +848,18 @@ function cardDialog(c, entityId) {
     toast(c ? "Tarjeta actualizada." : "Tarjeta agregada."); route();
   });
 }
-function statementDialog(c, x) {
+function statementDialog(c, x, entityId) {
   modal(`${c.card_type === "debito" ? "Extracto" : "Estado de cuenta"} ${c.nickname} · ${fdate(x.closing_date)}`, () => h("div", { class: "stack" },
     fld("Archivo (PDF o foto)", h("input", { name: "file", type: "file", accept: "application/pdf,image/*", required: true })),
+    h("label", { class: "row", style: "gap:8px" }, h("input", { type: "checkbox", name: "read", checked: true, style: "width:auto" }), h("span", { class: "small" }, "Leer los movimientos y compararlos con facturas y suscripciones (conciliación para el contador)")),
     h("p", { class: "small muted", style: "margin:0" }, "Es el soporte que se adjunta cuando envías una factura pagada con esta tarjeta en ese período. Puedes tachar los movimientos personales antes de subirlo.")),
   async (fd, form) => {
     const f = fd.get("file"); if (!f || !f.size) throw new Error("Elige un archivo.");
     form.querySelector("[type=submit]").textContent = "Subiendo…";
     const prep = await prepareUpload(f); const up = new FormData(); up.append("file", prep.file); up.append("original_size", prep.originalSize);
-    await api(`/cards/cycles/${x.id}/file`, { method: "POST", body: up }); toast("Estado de cuenta guardado."); route();
+    const r = await api(`/cards/cycles/${x.id}/file`, { method: "POST", body: up }); toast("Estado de cuenta guardado.");
+    const ent = state.entities.find((e) => e.id === (c.entity_id || entityId));
+    if (fd.get("read") && ent) setTimeout(() => bankImportDialog(ent, { cardId: c.id, file: f, fileId: r.file_id }), 60); else route();
   }, "Subir");
 }
 
@@ -1018,6 +1025,10 @@ async function accountantView(ent, q) {
     h("select", { "aria-label": "Año", style: "width:auto", onchange: (e) => { location.hash = nav({ anio: e.target.value }); } }, [now.getFullYear() + 1, now.getFullYear(), now.getFullYear() - 1, now.getFullYear() - 2].map((y) => h("option", { value: y, selected: y === year }, y))));
   const inv = d.invoices.filter((i) => i.kind !== "nota de crédito"), credits = d.invoices.filter((i) => i.kind === "nota de crédito");
   const movIn = d.moves.filter((x) => x.kind === "ingreso"), movOut = d.moves.filter((x) => x.kind === "gasto"), movTr = d.moves.filter((x) => x.kind === "transferencia");
+  const movRet = d.moves.filter((x) => x.kind === "retiro"), movAp = d.moves.filter((x) => x.kind === "aporte");
+  const subTot = d.sub_charges.filter((x) => x.currency === (ent.id === "sas" ? "COP" : "USD")).reduce((a, x) => a + x.amount, 0);
+  const sett = {}; for (const st of d.settlements) for (const [k, v] of Object.entries(st.breakdown)) sett[k] = (sett[k] || 0) + v;
+  const bankMiss = d.bank.filter((l) => l.status === "sin_soporte").length;
   const sum = (arr, k) => arr.reduce((a, x) => a + (Number(x[k]) || 0), 0);
   const group = (arr, key) => { const m = new Map(); for (const x of arr) { const k = x[key] || "Sin dato"; const g = m.get(k) || { k, n: 0, total: 0, tax: 0 }; g.n++; g.total += Number(x.total) || 0; g.tax += Number(x.tax) || 0; m.set(k, g); } return [...m.values()].sort((a, z) => z.total - a.total); };
   const cardOf = (i) => i.card ? `${i.card} · ${i.card_type === "debito" ? "Débito" : "Crédito"} •••• ${i.last4}` : i.card_last4 ? `•••• ${i.card_last4} (no registrada)` : "Sin tarjeta";
@@ -1034,8 +1045,12 @@ async function accountantView(ent, q) {
       { Concepto: "Empresa", Valor: ent.name }, { Concepto: "Período", Valor: `${label} (${from} a ${to})` },
       { Concepto: "Facturas de compra", Valor: inv.length }, { Concepto: "Subtotal compras", Valor: sum(inv, "subtotal") }, { Concepto: "Impuesto de venta pagado en compras", Valor: sum(inv, "tax") },
       { Concepto: "Envíos cobrados", Valor: sum(inv, "shipping") }, { Concepto: "Descuentos", Valor: sum(inv, "discount") }, { Concepto: "Total compras", Valor: sum(inv, "total") },
-      { Concepto: "Notas de crédito", Valor: sum(credits, "total") }, { Concepto: "Pagos recibidos de Amazon", Valor: sum(d.payouts, "amount") },
-      { Concepto: "Otros ingresos", Valor: sum(movIn, "amount") }, { Concepto: "Otros gastos", Valor: sum(movOut, "amount") }, { Concepto: "Transferencias (aportes y retiros)", Valor: sum(movTr, "amount") },
+      { Concepto: "Notas de crédito", Valor: sum(credits, "total") }, { Concepto: "Pagos recibidos de Amazon (depósitos)", Valor: sum(d.payouts, "amount") },
+      ...Object.keys(SETT_LABEL).filter((k) => sett[k]).map((k) => ({ Concepto: "Amazon · " + SETT_LABEL[k], Valor: Math.round(sett[k] * 100) / 100 })),
+      { Concepto: "Suscripciones cobradas", Valor: subTot },
+      { Concepto: "Otros ingresos", Valor: sum(movIn, "amount") }, { Concepto: "Otros gastos", Valor: sum(movOut, "amount") },
+      { Concepto: "Retiros del dueño", Valor: sum(movRet, "amount") }, { Concepto: "Aportes del dueño", Valor: sum(movAp, "amount") }, { Concepto: "Transferencias entre cuentas propias", Valor: sum(movTr, "amount") },
+      { Concepto: "Movimientos del banco leídos", Valor: d.bank.length }, { Concepto: "Movimientos del banco sin soporte", Valor: bankMiss },
       { Concepto: "Facturas sin confirmar", Valor: missing.unconfirmed }, { Concepto: "Facturas sin tarjeta asociada", Valor: missing.noCard },
       { Concepto: "Generado", Valor: new Date().toLocaleString("es-US", { timeZone: "America/Chicago" }) }]);
     add("Compras", d.invoices.map((i) => ({ Fecha: i.issue_date || "", Tipo: i.kind, Negocio: i.business, Proveedor: i.supplier || "", "N.º fiscal proveedor": i.supplier_tax_id || "", "Factura": i.invoice_number || "", "Orden de compra": i.po_number || "",
@@ -1046,7 +1061,10 @@ async function accountantView(ent, q) {
     add("Por tarjeta", byCard.map((g) => ({ Tarjeta: g.k, Facturas: g.n, Total: g.total })));
     add("Pagos de Amazon", d.payouts.map((x) => ({ Fecha: x.paid_on, Negocio: x.business, Monto: x.amount, Lote: x.lot || "", Notas: x.notes || "" })));
     add("Declaraciones", d.tax.map((t) => ({ Obligación: t.obligation, Período: t.label, Desde: t.period_start, Hasta: t.period_end, Vence: t.due_date, Estado: t.status, Monto: t.amount ?? "", Presentada: t.filed_on || "", Notas: t.notes || "" })));
-    add("Otros movimientos", d.moves.map((x) => ({ Fecha: x.moved_on, Tipo: MOVE_KIND[x.kind], Categoría: x.category || "", Concepto: x.concept, Monto: x.kind === "gasto" ? -x.amount : x.amount, Moneda: x.currency, "Cuenta o tarjeta": x.card ? `${x.card} •••• ${x.last4}` : "", Negocio: x.business || "", Soporte: x.filename || "", Notas: x.notes || "" })));
+    add("Otros movimientos", d.moves.map((x) => ({ Fecha: x.moved_on, Tipo: MOVE_KIND[x.kind], Categoría: x.category || "", Concepto: x.concept, Monto: MOVE_OUT(x.kind) ? -x.amount : x.amount, Moneda: x.currency, "Cuenta o tarjeta": x.card ? `${x.card} •••• ${x.last4}` : "", Negocio: x.business || "", Soporte: x.filename || "", Notas: x.notes || "" })));
+    add("Suscripciones", d.sub_charges.map((x) => ({ Fecha: x.date, Herramienta: x.name, Plataforma: x.business, Valor: x.amount, Moneda: x.currency, Tipo: CYCLE[x.cycle], Uso: x.use_kind === "mixto" ? "Mixto (empresa y personal)" : "Empresa", Tarjeta: x.card, "En el banco": x.bank ? `Sí, ${x.bank.posted_on} por ${Math.abs(x.bank.amount)}` : d.bank.length ? "No aparece" : "Sin extracto leído", Enlace: x.url || "" })));
+    add("Liquidaciones Amazon", d.settlements.map((x) => ({ Negocio: x.business, Reporte: x.kind === "liquidacion" ? "Liquidación " + x.ref : x.ref, Desde: x.period_start || "", Hasta: x.period_end, Depósito: x.deposit_date || "", ...Object.fromEntries(Object.keys(SETT_LABEL).map((k) => [SETT_LABEL[k], x.breakdown[k] ? Math.round(x.breakdown[k] * 100) / 100 : 0])), Neto: x.total, Moneda: x.currency })));
+    add("Banco (conciliación)", d.bank.map((l) => ({ Fecha: l.posted_on, Cuenta: l.card ? `${l.card} •••• ${l.last4}` : "", Descripción: l.description, Monto: l.amount, Estado: BANK_ST[l.status][0], Soporte: l.match_label || "", Archivo: l.filename || "" })));
     add("Documentos", d.docs.map((x) => ({ Carpeta: x.folder, Documento: x.title, Fecha: x.issued_on || x.created_at.slice(0, 10), Archivo: x.filename })));
     add("Estados de cuenta", d.statements.map((x) => ({ Tarjeta: `${x.nickname} •••• ${x.last4}`, Tipo: x.card_type === "debito" ? "Débito" : "Crédito", Corte: x.closing_date, Pago: x.card_type === "debito" ? "" : x.due_date, Pagada: x.card_type === "debito" ? "" : x.paid ? "Sí" : "No", Archivo: x.filename })));
     return XLSX.write(wb, { bookType: "xlsx", type: "array" });
@@ -1064,22 +1082,31 @@ async function accountantView(ent, q) {
     for (const i of d.invoices) if (i.file_id) { zip.file(uniq(`Facturas/${fileName(i.business)}/${(i.issue_date || "sin-fecha").slice(0, 7)}/${fileName([i.issue_date, i.supplier, i.invoice_number].filter(Boolean).join(" "))}${extOf(i.filename)}`), await get(i.file_id)); nfiles++; }
     for (const x of d.statements) { zip.file(uniq(`Estados de cuenta/${fileName(x.nickname + " " + x.last4)}/${x.closing_date}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
     for (const x of d.moves) if (x.file_id) { zip.file(uniq(`Otros movimientos/${x.moved_on.slice(0, 7)}/${fileName(`${x.moved_on} ${MOVE_KIND[x.kind]} ${x.concept}`)}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
+    const stIds = new Set(d.statements.map((x) => x.file_id));
+    for (const fid of [...new Set(d.bank.map((l) => l.file_id).filter((f) => f && !stIds.has(f)))]) { const l = d.bank.find((x) => x.file_id === fid); zip.file(uniq(`Extractos del banco/${fileName((l.card || "Cuenta") + " " + (l.last4 || ""))}/${fileName(l.filename || fid)}`), await get(fid)); nfiles++; }
+    for (const x of d.settlements) if (x.file_id) { zip.file(uniq(`Liquidaciones de Amazon/${fileName(x.kind === "liquidacion" ? `${x.period_end} liquidación ${x.ref}` : x.ref)}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
     for (const x of d.docs) { zip.file(uniq(`Documentos de la empresa/${fileName(x.folder)}/${fileName(x.title)}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
     for (const t of d.tax) for (const [fid, fn, tag] of [[t.return_file_id, t.return_filename, "declaración"], [t.payment_file_id, t.payment_filename, "pago"]]) if (fid) { zip.file(uniq(`Declaraciones/${fileName(t.obligation)}/${fileName(t.label)} - ${tag}${extOf(fn)}`), await get(fid)); nfiles++; }
     save(await zip.generateAsync({ type: "blob" }), base + ".zip"); toast(`Paquete listo: Excel y ${nfiles} archivo${nfiles === 1 ? "" : "s"}.`);
   }) }, "Descargar paquete (ZIP)");
   return h("div", { class: "stack", style: "gap:18px" },
     h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, "Paquete para el contador"), h("span", { class: "small muted" }, `${label} · todo lo de ${ent.name}, de todos sus negocios`)), sel),
-      h("p", { class: "small", style: "margin:0" }, "Todo lo financiero de la empresa llega aquí solo, sin importar dónde lo subas: facturas de cualquier negocio, pagos de Amazon, estados de cuenta de las tarjetas, documentos bancarios y fiscales, declaraciones y los movimientos que agregues abajo."),
+      h("p", { class: "small", style: "margin:0" }, "Todo lo financiero de la empresa llega aquí solo, sin importar dónde lo subas: facturas de cualquier negocio, ventas y pagos de Amazon, suscripciones, extractos del banco, documentos bancarios y fiscales, declaraciones y los movimientos que agregues abajo."),
       h("div", { class: "row" }, zipBtn, xlsBtn, h("span", { class: "small muted" }, "El ZIP trae el Excel y todos los archivos ordenados por carpeta.")),
-      missing.unconfirmed || missing.noCard ? h("p", { class: "small", style: "margin:0;color:var(--warn)" }, [missing.unconfirmed ? `${missing.unconfirmed} factura(s) sin confirmar` : "", missing.noCard ? `${missing.noCard} sin tarjeta asociada` : ""].filter(Boolean).join(" · ") + ". Conviene revisarlas antes de mandarle el paquete.") : ""),
-    h("div", { class: "grid g4" }, stat("Compras (facturas)", money(sum(inv, "total"))), stat("Impuesto de venta pagado", money(sum(inv, "tax"))), stat("Pagos de Amazon", money(sum(d.payouts, "amount"))), stat("Facturas", inv.length),
-      stat("Otros ingresos", money(sum(movIn, "amount"))), stat("Otros gastos", money(sum(movOut, "amount"))), stat("Estados de cuenta", d.statements.length), stat("Documentos bancarios y fiscales", d.docs.length)),
-    h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, "Otros movimientos"), h("span", { class: "small muted" }, "Lo que no es una factura de compra: comisiones del banco, suscripciones, depósitos, aportes o retiros del dueño…")),
+      missing.unconfirmed || missing.noCard || bankMiss ? h("p", { class: "small", style: "margin:0;color:var(--warn)" }, [missing.unconfirmed ? `${missing.unconfirmed} factura(s) sin confirmar` : "", missing.noCard ? `${missing.noCard} sin tarjeta asociada` : "", bankMiss ? `${bankMiss} movimiento(s) del banco sin soporte` : ""].filter(Boolean).join(" · ") + ". Conviene revisarlos antes de mandarle el paquete.") : ""),
+    h("div", { class: "grid g4" }, stat("Compras (facturas)", money(sum(inv, "total"))), stat("Ventas de Amazon", money((sett.ventas || 0) + (sett.reembolsos || 0))), stat("Depósitos de Amazon", money(sum(d.payouts, "amount"))), stat("Facturas", inv.length),
+      stat("Suscripciones", money(subTot, ent.id === "sas" ? "COP" : "USD")), stat("Otros gastos", money(sum(movOut, "amount"))), stat("Otros ingresos", money(sum(movIn, "amount"))), stat("Retiros del dueño", money(sum(movRet, "amount")))),
+    settlementSection(ent, d),
+    bankSection(ent, d),
+    d.sub_charges.length ? h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, "Suscripciones cobradas en el período"), h("span", { class: "small muted" }, "Cada cobro esperado y si ya aparece en el extracto del banco.")), h("a", { href: `#/empresa/${ent.id}/suscripciones`, style: "font-weight:700" }, "Administrar →")),
+      h("div", { class: "tablewrap" }, h("table", { style: "min-width:560px" }, h("thead", null, h("tr", null, ["Fecha", "Herramienta", "Plataforma", "Valor", "En el banco"].map((c) => h("th", null, c)))),
+        h("tbody", null, d.sub_charges.map((x) => h("tr", null, h("td", { class: "mono" }, fdate(x.date)), h("td", null, x.name), h("td", { class: "small" }, x.business), h("td", { class: "mono" }, money(x.amount, x.currency)),
+          h("td", null, x.bank ? pill(`Sí · ${fdate(x.bank.posted_on)}${Math.abs(Math.abs(x.bank.amount) - x.amount) > 0.01 ? " · " + money(Math.abs(x.bank.amount)) : ""}`, "ok") : x.date > new Date().toISOString().slice(0, 10) ? pill("Próximo") : d.bank.length ? pill("No aparece", "warn") : h("span", { class: "small muted" }, "Sin extracto leído")))))))) : "",
+    h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, "Otros movimientos"), h("span", { class: "small muted" }, "Lo que no es una factura ni una suscripción: comisiones del banco, depósitos, retiros o aportes del dueño…")),
         h("button", { class: "btn primary sm only-upload", type: "button", onclick: () => moveDialog(ent) }, "+ Agregar movimiento")),
       d.moves.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:620px" }, h("thead", null, h("tr", null, ["Fecha", "Tipo", "Concepto", "Monto", "Cuenta", "Soporte", ""].map((c) => h("th", null, c)))),
-        h("tbody", null, d.moves.map((x) => h("tr", null, h("td", { class: "mono" }, fdate(x.moved_on)), h("td", null, pill(MOVE_KIND[x.kind], x.kind === "ingreso" ? "ok" : x.kind === "gasto" ? "warn" : "info")),
-          h("td", null, x.concept, x.category ? h("div", { class: "small muted" }, x.category) : ""), h("td", { class: "mono" }, (x.kind === "gasto" ? "−" : "") + money(x.amount, x.currency)),
+        h("tbody", null, d.moves.map((x) => h("tr", null, h("td", { class: "mono" }, fdate(x.moved_on)), h("td", null, pill(MOVE_KIND[x.kind], MOVE_PILL[x.kind])),
+          h("td", null, x.concept, x.category ? h("div", { class: "small muted" }, x.category) : ""), h("td", { class: "mono" }, (MOVE_OUT(x.kind) ? "−" : "") + money(x.amount, x.currency)),
           h("td", { class: "small" }, x.card ? `${x.card} •••• ${x.last4}` : "—"), h("td", null, x.file_id ? h("a", { href: "/api/files/" + x.file_id, target: "_blank", rel: "noopener" }, "Ver") : "—"),
           h("td", { class: "only-admin" }, h("button", { class: "linkbtn small", type: "button", style: "color:var(--bad)", onclick: () => confirmDelete("Eliminar movimiento", "Se borra el movimiento y su soporte.", async () => { await api("/moves/" + x.id, { method: "DELETE" }); route(); }) }, "Eliminar")))))))
         : h("p", { class: "empty" }, "No hay otros movimientos en este período.")),
@@ -1088,28 +1115,42 @@ async function accountantView(ent, q) {
     table("Por proveedor", bySup, [["Proveedor", (g) => g.k], ["Facturas", (g) => g.n, "mono"], ["Impuesto", (g) => money(g.tax), "mono"], ["Total", (g) => money(g.total), "mono"]]),
     table("Por tarjeta", byCard, [["Tarjeta", (g) => g.k], ["Facturas", (g) => g.n, "mono"], ["Total", (g) => money(g.total), "mono"]]),
     table("Declaraciones del período", d.tax, [["Obligación", (t) => t.obligation], ["Período", (t) => t.label], ["Vence", (t) => fdate(t.due_date), "mono"], ["Estado", (t) => pill(...(PSTATE[t.status] || [t.status, ""]))], ["Monto", (t) => t.amount != null ? money(t.amount) : "—", "mono"]]),
-    !d.invoices.length && !d.payouts.length && !d.tax.length && !d.moves.length ? h("section", { class: "card" }, h("p", { class: "empty" }, "No hay facturas ni pagos en este período.")) : "");
+    !d.invoices.length && !d.payouts.length && !d.tax.length && !d.moves.length && !d.bank.length && !d.settlements.length && !d.sub_charges.length ? h("section", { class: "card" }, h("p", { class: "empty" }, "No hay facturas ni pagos en este período.")) : "");
 }
 
-const MOVE_KIND = { ingreso: "Ingreso", gasto: "Gasto", transferencia: "Transferencia" };
+const MOVE_KIND = { ingreso: "Ingreso", gasto: "Gasto", retiro: "Retiro del dueño", aporte: "Aporte del dueño", transferencia: "Entre cuentas propias" };
+const MOVE_PILL = { ingreso: "ok", gasto: "warn", retiro: "bad", aporte: "info", transferencia: "" };
+const MOVE_OUT = (k) => k === "gasto" || k === "retiro";
 const MOVE_CAT = {
   gasto: ["Inventario / costo de mercancía", "Tarifas de Amazon u otras plataformas", "Envíos y fletes", "Empaque y etiquetas", "Software y suscripciones", "Comisiones bancarias", "Impuestos, licencias y trámites", "Publicidad", "Oficina y equipo", "Servicios profesionales", "Otros gastos"],
   ingreso: ["Ventas", "Reembolsos", "Intereses", "Otros ingresos"],
-  transferencia: ["Aporte del dueño", "Retiro del dueño", "Entre cuentas propias"],
+  retiro: ["Retiro del dueño"],
+  aporte: ["Aporte del dueño"],
+  transferencia: ["Entre cuentas propias", "Pago de tarjeta de crédito"],
 };
-async function moveDialog(ent) {
+const MOVE_HELP = {
+  retiro: "Dinero que sacas de la empresa para ti. No es un gasto: el contador lo registra aparte.",
+  aporte: "Dinero tuyo que pones en la empresa. No es un ingreso por ventas.",
+  transferencia: "Pasar dinero entre cuentas de la misma empresa o pagar una tarjeta. No es gasto ni ingreso.",
+  gasto: "Si es una suscripción que se repite, mejor agrégala en la pestaña Suscripciones para no contarla dos veces.", ingreso: "",
+};
+async function moveDialog(ent, line) {
   const { cards } = await api("/cards?entity=" + ent.id);
   const bizs = state.businesses.filter((b) => b.entity_id === ent.id);
-  modal("Agregar movimiento", () => {
+  modal(line ? "Registrar movimiento del banco" : "Agregar movimiento", () => {
     const cat = h("select", { name: "category" });
-    const kindSel = h("select", { name: "kind", onchange: () => fill() }, Object.entries(MOVE_KIND).map(([k, l]) => h("option", { value: k, selected: k === "gasto" }, l)));
-    const fill = () => cat.replaceChildren(...MOVE_CAT[kindSel.value].map((c) => h("option", null, c)));
+    const help = h("p", { class: "small muted", style: "margin:0" });
+    const kindSel = h("select", { name: "kind", onchange: () => fill() }, Object.entries(MOVE_KIND).map(([k, l]) => h("option", { value: k, selected: k === (line ? (line.amount < 0 ? "gasto" : "ingreso") : "gasto") }, l)));
+    const fill = () => { cat.replaceChildren(...MOVE_CAT[kindSel.value].map((c) => h("option", null, c))); help.textContent = MOVE_HELP[kindSel.value] || ""; };
     fill();
     return h("div", { class: "stack" },
-      h("div", { class: "fgrid" }, fld("Tipo", kindSel), fld("Categoría", cat), fld("Fecha", h("input", { name: "moved_on", type: "date", required: true, value: new Date().toISOString().slice(0, 10) }))),
-      h("div", { class: "fgrid" }, fld("Monto", h("input", { name: "amount", type: "number", step: "0.01", required: true, inputmode: "decimal" })), fld("Moneda", h("select", { name: "currency" }, (ent.id === "sas" ? ["COP", "USD"] : ["USD", "COP"]).map((c) => h("option", null, c)))),
-        fld("Cuenta o tarjeta", h("select", { name: "card_id" }, h("option", { value: "" }, "—"), cards.map((c) => h("option", { value: c.id }, cardText(c)))))),
-      fld("Concepto", h("input", { name: "concept", required: true, placeholder: "Por ejemplo: comisión mensual del banco, suscripción de Keepa…" })),
+      line ? h("p", { class: "small", style: "margin:0" }, "Del extracto: ", h("b", null, line.description), ` · ${fdate(line.posted_on)} · ${money(line.amount)}`) : "",
+      line ? h("input", { type: "hidden", name: "bank_line_id", value: line.id }) : "",
+      h("div", { class: "fgrid" }, fld("Tipo", kindSel), fld("Categoría", cat), fld("Fecha", h("input", { name: "moved_on", type: "date", required: true, value: line?.posted_on || new Date().toISOString().slice(0, 10) }))),
+      help,
+      h("div", { class: "fgrid" }, fld("Monto", h("input", { name: "amount", type: "number", step: "0.01", required: true, inputmode: "decimal", value: line ? Math.abs(line.amount) : "" })), fld("Moneda", h("select", { name: "currency" }, (ent.id === "sas" ? ["COP", "USD"] : ["USD", "COP"]).map((c) => h("option", null, c)))),
+        fld("Cuenta o tarjeta", h("select", { name: "card_id" }, h("option", { value: "" }, "—"), cards.map((c) => h("option", { value: c.id, selected: line?.card_id === c.id }, cardText(c)))))),
+      fld("Concepto", h("input", { name: "concept", required: true, value: line?.description || "", placeholder: "Por ejemplo: comisión mensual del banco, retiro para gastos personales…" })),
       bizs.length ? fld("Negocio (opcional)", h("select", { name: "business_id" }, h("option", { value: "" }, "General de la empresa"), bizs.map((b) => h("option", { value: b.id }, b.name)))) : "",
       fld("Soporte (opcional: foto, PDF del extracto o comprobante)", h("input", { name: "file", type: "file", accept: "image/*,application/pdf" })),
       fld("Notas", h("input", { name: "notes" })));
@@ -1118,7 +1159,408 @@ async function moveDialog(ent) {
     const f = fd.get("file");
     if (f && f.size) { form.querySelector("[type=submit]").textContent = "Subiendo…"; const prep = await prepareUpload(f); fd.set("file", prep.file); fd.set("original_size", prep.originalSize); } else fd.delete("file");
     await api("/moves", { method: "POST", body: fd }); toast("Movimiento agregado al resumen del contador."); route();
-  }, "Agregar");
+  }, line ? "Registrar" : "Agregar");
+}
+
+// ---------- suscripciones ----------
+const CYCLE = { mensual: "Mensual", anual: "Anual" };
+async function subsView(ent, biz, q) {
+  const [{ subs }, { cards }] = await Promise.all([api(biz ? "/subs?business=" + biz.id : "/subs?entity=" + ent.id), api("/cards?entity=" + ent.id)]);
+  const bizs = state.businesses.filter((b) => b.entity_id === ent.id);
+  const plat = biz ? null : q?.get("p") || "";
+  const shown = subs.filter((s) => !plat || (plat === "general" ? !s.business_id : s.business_id === plat));
+  const act = shown.filter((s) => s.active);
+  const per = {}; for (const s of act) { const c = s.currency || "USD"; per[c] = per[c] || { m: 0, y: 0 }; per[c].m += s.cycle === "anual" ? s.amount / 12 : s.amount; per[c].y += s.cycle === "anual" ? s.amount : s.amount * 12; }
+  const curs = Object.keys(per).length ? Object.keys(per) : [ent.id === "sas" ? "COP" : "USD"];
+  const stat = (l, v) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, l), h("br"), h("b", null, v));
+  const groups = new Map();
+  for (const s of shown) { const k = s.business || "General de la empresa"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(s); }
+  const base = biz ? `#/negocio/${biz.id}/suscripciones` : `#/empresa/${ent.id}/suscripciones`;
+  const filt = biz ? "" : h("div", { class: "chips", role: "tablist", "aria-label": "Plataforma" },
+    [["", "Todas"], ...bizs.map((b) => [b.id, b.name]), ["general", "General de la empresa"]].map(([k, l]) => h("a", { href: base + (k ? "?p=" + k : ""), class: "pill" + (plat === k ? " ok" : ""), role: "tab", "aria-selected": String(plat === k), style: "text-decoration:none" }, l)));
+  const row = (s) => h("tr", { style: s.active ? "" : "opacity:.55" },
+    h("td", null, s.url ? h("a", { href: s.url, target: "_blank", rel: "noopener", style: "font-weight:700" }, s.name) : h("b", null, s.name), s.notes ? h("div", { class: "small muted" }, s.notes) : ""),
+    h("td", { class: "mono" }, money(s.amount, s.currency)), h("td", null, CYCLE[s.cycle]),
+    h("td", { class: "mono" }, s.active ? fdate(s.next_charge) : h("span", { class: "small muted" }, "Cancelada " + fdate(s.ended_on))),
+    h("td", { class: "small" }, s.card ? `${s.card} •••• ${s.last4}` : "—"),
+    h("td", null, pill(s.use_kind === "mixto" ? "Mixto" : "Empresa", s.use_kind === "mixto" ? "warn" : "ok")),
+    h("td", { class: "only-admin" }, h("button", { class: "linkbtn small", type: "button", onclick: () => subDialog(s, ent, biz, cards) }, "Editar")));
+  return h("div", { class: "stack", style: "gap:16px" },
+    h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:640px" }, biz ? `Las herramientas que pagas para ${biz.name}. Cada cobro sale en el paquete del contador y se compara con el estado de cuenta de la tarjeta.` : "Todas las herramientas que paga la empresa, por plataforma. Cada cobro sale en el paquete del contador y se compara con el estado de cuenta."),
+      h("button", { class: "btn primary sm only-upload", type: "button", onclick: () => subDialog(null, ent, biz, cards, plat && plat !== "general" ? plat : "") }, "+ Agregar suscripción")),
+    filt,
+    h("div", { class: "grid g4" }, stat("Activas", act.length), ...curs.flatMap((c) => [stat("Al mes" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.m || 0, c)), stat("Al año" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.y || 0, c))])),
+    shown.length ? [...groups.entries()].map(([k, list]) => h("section", { class: "card stack" }, h("h2", null, k),
+      h("div", { class: "tablewrap" }, h("table", { style: "min-width:640px" }, h("thead", null, h("tr", null, ["Herramienta", "Valor", "Tipo", "Próximo cobro", "Tarjeta", "Uso", ""].map((c) => h("th", null, c)))), h("tbody", null, list.map(row))))))
+      : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay suscripciones aquí. Agrega cada herramienta que pagas (Keepa, SellerAmp, Shopify, Canva…).")),
+    h("section", { class: "card stack" }, h("h2", null, "¿Cuentan como gasto de la empresa?"),
+      h("p", { class: "small", style: "margin:0" }, ent.id === "sas"
+        ? "Sí, si la herramienta se usa para el negocio. En Colombia el gasto necesita soporte: la factura electrónica del proveedor o, si es del exterior, el documento soporte. Guarda la factura de cada cobro y confirma con el contador el IVA y la retención de servicios del exterior."
+        : "Sí, si la herramienta se usa para el negocio: en la LLC (Schedule C) son gastos deducibles y bajan la utilidad sobre la que pagas impuestos. Si también la usas para algo personal, solo cuenta la parte del negocio: márcala como \"Mixto\" y el contador decide el porcentaje."),
+      h("p", { class: "small muted", style: "margin:0" }, "No soy contador: el contador confirma cómo se clasifica cada una.")));
+}
+function subDialog(s, ent, biz, cards, platDefault) {
+  const bizs = state.businesses.filter((b) => b.entity_id === ent.id);
+  modal(s ? "Editar " + s.name : "Agregar suscripción", () => h("div", { class: "stack" },
+    h("div", { class: "fgrid" },
+      fld("Plataforma", h("select", { name: "business_id" }, h("option", { value: "" }, "General de la empresa"), bizs.map((b) => h("option", { value: b.id, selected: (s ? s.business_id : biz?.id || platDefault) === b.id }, b.name)))),
+      fld("Herramienta", h("input", { name: "name", required: true, value: s?.name || "", placeholder: "Por ejemplo: Keepa" })),
+      fld("Enlace (opcional)", h("input", { name: "url", value: s?.url || "", placeholder: "https://…", inputmode: "url" }))),
+    h("div", { class: "fgrid" },
+      fld("Valor de la suscripción", h("input", { name: "amount", type: "number", step: "0.01", min: "0", required: true, inputmode: "decimal", value: s?.amount ?? "" })),
+      fld("Moneda", h("select", { name: "currency" }, (ent.id === "sas" ? ["COP", "USD"] : ["USD", "COP"]).map((c) => h("option", { selected: s?.currency === c }, c)))),
+      fld("Tipo", h("select", { name: "cycle" }, Object.entries(CYCLE).map(([k, l]) => h("option", { value: k, selected: (s?.cycle || "mensual") === k }, l)))),
+      fld("Fecha de cobro", h("input", { name: "charge_date", type: "date", required: true, value: s?.charge_date || "" }))),
+    h("p", { class: "small muted", style: "margin:-4px 0 0" }, "La fecha de un cobro real (el primero o el último). Con ella se calculan los siguientes: cada mes el mismo día, o cada año la misma fecha."),
+    h("div", { class: "fgrid" },
+      fld("Tarjeta con que se paga", h("select", { name: "card_id" }, h("option", { value: "" }, "—"), cards.map((c) => h("option", { value: c.id, selected: s?.card_id === c.id }, cardText(c))))),
+      fld("Uso", h("select", { name: "use_kind" }, [["empresa", "Solo de la empresa"], ["mixto", "Mixto (empresa y personal)"]].map(([k, l]) => h("option", { value: k, selected: (s?.use_kind || "empresa") === k }, l)))),
+      fld("Cancelada desde (si ya no la pagas)", h("input", { name: "ended_on", type: "date", value: s?.ended_on || "" }))),
+    fld("Notas", h("input", { name: "notes", value: s?.notes || "" })),
+    s && isAdmin() ? h("button", { class: "btn danger sm", type: "button", style: "align-self:flex-start", onclick: () => confirmDelete("Eliminar suscripción", `Se borra ${s.name} y deja de salir en el paquete del contador. Si solo la cancelaste, mejor pon la fecha en "Cancelada desde" para conservar los cobros pasados.`, async () => { await api("/subs/" + s.id, { method: "DELETE" }); toast("Suscripción eliminada."); route(); }) }, "Eliminar") : ""),
+  async (fd) => { await api(s ? "/subs/" + s.id : "/subs", { method: s ? "PUT" : "POST", body: { ...Object.fromEntries(fd), entity_id: ent.id } }); toast(s ? "Suscripción actualizada." : "Suscripción agregada."); route(); });
+}
+
+// ---------- lectura de archivos: CSV, Excel y PDF ----------
+function parseDelimited(text) {
+  text = text.replace(/^\uFEFF/, "");
+  const sample = text.split(/\r?\n/).slice(0, 30).join("\n");
+  const delim = ["\t", ",", ";"].map((d) => [d, sample.split(d).length]).sort((a, z) => z[1] - a[1])[0][0];
+  const rows = []; let row = [], cur = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) { if (ch === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+    else if (ch === '"' && cur.trim() === "") { q = true; cur = ""; }
+    else if (ch === delim) { row.push(cur.trim()); cur = ""; }
+    else if (ch === "\n" || ch === "\r") { if (ch === "\r" && text[i + 1] === "\n") i++; row.push(cur.trim()); if (row.some((c) => c)) rows.push(row); row = []; cur = ""; }
+    else cur += ch;
+  }
+  row.push(cur.trim()); if (row.some((c) => c)) rows.push(row);
+  return rows;
+}
+async function readRows(file) {
+  if (/\.(xlsx|xls)$/i.test(file.name)) {
+    const XLSX = await loadLib("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js", "XLSX");
+    const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+    return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: false, defval: "" }).map((r) => r.map((c) => String(c).trim()));
+  }
+  return parseDelimited(await file.text());
+}
+const MONTHS_EN = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const MONTHS_ES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+const monIdx = (w) => { w = String(w).toLowerCase().slice(0, 3); const i = MONTHS_EN.indexOf(w); return i >= 0 ? i + 1 : MONTHS_ES.indexOf(w) + 1; };
+const iso = (y, m, d) => (y > 1990 && m >= 1 && m <= 12 && d >= 1 && d <= 31 ? `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}` : null);
+// Lee fechas como 2026-10-03, 10/03/2026, 10/03/26, 03.10.2026, Oct 3, 2026, 3 oct 2026 o 10/03 (con el año que se pase)
+function parseAnyDate(v, { dmy = false, year = null, endMonth = null } = {}) {
+  const s = String(v || "").trim(); let m;
+  if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) return iso(+m[1], +m[2], +m[3]);
+  if ((m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/))) return iso(+m[3], +m[2], +m[1]);
+  const fy = (y) => (y < 100 ? 2000 + y : y);
+  if ((m = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b/))) { let a = +m[1], b = +m[2]; if (a > 12 || (dmy && b <= 12)) [a, b] = [b, a]; return iso(fy(+m[3]), a, b); }
+  if ((m = s.match(/^([A-Za-zé]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})/)) && monIdx(m[1])) return iso(+m[3], monIdx(m[1]), +m[2]);
+  if ((m = s.match(/^(\d{1,2})\s+(?:de\s+)?([A-Za-zé]{3,9})\.?(?:\s+(?:de\s+)?(\d{4}))?/)) && monIdx(m[2])) { const mo = monIdx(m[2]); const y = m[3] ? +m[3] : year && endMonth && mo > endMonth ? year - 1 : year; return y ? iso(y, mo, +m[1]) : null; }
+  if ((m = s.match(/^([A-Za-z]{3})\.?\s+(\d{1,2})\b/)) && monIdx(m[1]) && year) { const mo = monIdx(m[1]); return iso(endMonth && mo > endMonth ? year - 1 : year, mo, +m[2]); }
+  if ((m = s.match(/^(\d{1,2})[/-](\d{1,2})\b/)) && year) { let a = +m[1], b = +m[2]; if (dmy) [a, b] = [b, a]; return iso(endMonth && a > endMonth ? year - 1 : year, a, b); }
+  return null;
+}
+// "$1,234.56", "-12.00", "(12.00)", "12.00-", "12.00 CR", "1.234,56"
+function parseMoney(v) {
+  let s = String(v ?? "").trim(); if (!s) return null;
+  const neg = /^-|^\(|\)$|-$|\bCR$/i.test(s.replace(/\s+/g, " ")) || /^\$?\s*-/.test(s);
+  s = s.replace(/CR$/i, "").replace(/[^0-9.,]/g, "");
+  if (!s) return null;
+  if (/,\d{2}$/.test(s) && !/\.\d{2}$/.test(s)) s = s.replace(/\./g, "").replace(",", "."); else s = s.replace(/,/g, "");
+  const n = Number(s); return Number.isFinite(n) ? (neg ? -n : n) : null;
+}
+async function pdfTextLines(file) {
+  const pdfjs = await loadPdfJs();
+  const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  const lines = [];
+  for (let i = 1; i <= Math.min(doc.numPages, 30); i++) {
+    const tc = await (await doc.getPage(i)).getTextContent();
+    const items = tc.items.filter((it) => it.str.trim()).map((it) => ({ x: it.transform[4], y: it.transform[5], s: it.str.trim() })).sort((a, z) => z.y - a.y || a.x - z.x);
+    let cur = [], y0 = null;
+    const flush = () => { if (cur.length) lines.push(cur.sort((a, z) => a.x - z.x).map((x) => x.s).join(" ").replace(/\s+/g, " ")); cur = []; };
+    for (const it of items) { if (y0 !== null && Math.abs(it.y - y0) > 2.5) flush(); if (!cur.length) y0 = it.y; cur.push(it); }
+    flush();
+  }
+  return lines;
+}
+
+// ---------- extractos del banco ----------
+const PAY_RE = /(payment|pymt|pmt|autopay|thank you|pago)/i;
+const IN_HINT = /(deposit|transfer from|xfer from|zelle from|interest paid|refund|reembolso|payroll|abono|consignaci|amazon.*(pmts|payments|seller))/i;
+function bankFromRows(rows, { dmy }) {
+  const hi = rows.findIndex((r) => r.some((c) => /date|fecha/i.test(c)) && r.some((c) => /amount|monto|valor|importe|debit|credit|withdraw|deposit|cargo|abono/i.test(c)));
+  if (hi < 0) return null;
+  const H = rows[hi].map((c) => c.toLowerCase());
+  const col = (re, not) => H.findIndex((c) => re.test(c) && !(not && not.test(c)));
+  let cDate = col(/post/); if (cDate < 0 || !/date|fecha/.test(H[cDate])) cDate = col(/date|fecha/);
+  let cDesc = col(/desc|memo|payee|detail|concepto|merchant|referencia|name|nombre/, /date|fecha|amount|monto|type/); if (cDesc < 0) cDesc = col(/transaction|transacci/, /date|fecha|amount|monto|id/);
+  const cAmt = col(/amount|monto|valor|importe/, /balance|saldo|debit|credit|d[ée]bito|cr[ée]dito/);
+  const cDeb = col(/debit|withdraw|cargo|retiro|d[ée]bito/), cCred = col(/credit|deposit|abono|cr[ée]dito/, /card|tarjeta/);
+  const lines = [];
+  for (const r of rows.slice(hi + 1)) {
+    const d = parseAnyDate(r[cDate], { dmy }); if (!d) continue;
+    let amount = null;
+    if (cAmt >= 0 && r[cAmt] !== "") amount = parseMoney(r[cAmt]);
+    else if (cDeb >= 0 || cCred >= 0) { const de = Math.abs(parseMoney(r[cDeb]) || 0), cr = Math.abs(parseMoney(r[cCred]) || 0); amount = cr - de; }
+    if (!amount) continue;
+    const desc = (cDesc >= 0 ? r[cDesc] : r.filter((c, i) => i !== cDate && i !== cAmt && i !== cDeb && i !== cCred && !/^[\d.,$-]*$/.test(c)).join(" ")) || "Movimiento";
+    lines.push({ posted_on: d, description: desc.replace(/\s+/g, " ").trim(), amount });
+  }
+  return { lines, single: cAmt >= 0 };
+}
+function bankFromPdf(textLines, { credit, dmy }) {
+  const all = textLines.join("\n");
+  // Año y mes de cierre: la fecha completa más reciente del documento
+  const fulls = [...all.matchAll(/\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/g)].map((m) => parseAnyDate(m[0], { dmy })).concat([...all.matchAll(/\b([A-Z][a-z]{2,8})\.? (\d{1,2}), (\d{4})\b/g)].map((m) => parseAnyDate(m[0]))).filter(Boolean).sort();
+  const end = fulls[fulls.length - 1] || new Date().toISOString().slice(0, 10);
+  const year = +end.slice(0, 4), endMonth = +end.slice(5, 7);
+  const DATE = /^(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|[A-Za-z]{3}\.? \d{1,2}(?:,? \d{4})?|\d{1,2} [A-Za-z]{3}\.?(?: \d{4})?)\s+/;
+  const AMT = /\(?-?\$?\s?\d{1,3}(?:,\d{3})*\.\d{2}\)?(?:\s?(?:-|CR)(?=\s|$))?/g;
+  let section = null; const lines = [];
+  for (const raw of textLines) {
+    const ln = raw.trim();
+    const m = ln.match(DATE);
+    if (!m) {
+      if (/^(payments?|credits?|deposits?|other additions|abonos|cr[ée]ditos|electronic deposits)/i.test(ln) || /payments and (other )?credits|deposits and (other )?(additions|credits)/i.test(ln)) section = "in";
+      else if (/^(purchases?|charges?|withdrawals?|debits?|other subtractions|card transactions|checks|fees|cargos|retiros|compras)/i.test(ln) || /purchases and (other )?(charges|debits)|withdrawals and (other )?(subtractions|debits)/i.test(ln)) section = "out";
+      continue;
+    }
+    const d = parseAnyDate(m[1], { dmy, year, endMonth }); if (!d) continue;
+    let rest = ln.slice(m[0].length);
+    const m2 = rest.match(DATE); if (m2) rest = rest.slice(m2[0].length);
+    const amts = [...rest.matchAll(AMT)];
+    if (!amts.length) continue;
+    const first = amts[0];
+    let desc = rest.slice(0, first.index).replace(/^\d{4,}\s+/, "").replace(/\s+/g, " ").trim();
+    if (!desc || /balance|saldo|^total|minimum payment|pago m[íi]nimo/i.test(desc)) continue;
+    const tok = first[0]; const v = Math.abs(parseMoney(tok) || 0); if (!v) continue;
+    const neg = /^\(|^-|-$|CR$|\$\s?-/.test(tok.trim()) || /^-/.test(tok.replace("$", ""));
+    let inflow;
+    if (credit) inflow = neg || section === "in" || PAY_RE.test(desc);
+    else inflow = neg ? false : section === "in" ? true : section === "out" ? false : IN_HINT.test(desc);
+    lines.push({ posted_on: d, description: desc.replace(/\d{9,}/g, (x) => "•••• " + x.slice(-4)), amount: inflow ? v : -v });
+  }
+  return lines;
+}
+async function bankImportDialog(ent, opts = {}) {
+  const { cards } = await api("/cards?entity=" + ent.id);
+  let lines = [], file = null, fileId = opts.fileId || null;
+  const list = h("div", { class: "stack", style: "gap:6px" });
+  const info = h("p", { class: "small muted", style: "margin:0" }, "Sube el extracto o estado de cuenta: PDF descargado del banco, o mejor aún el CSV o Excel de movimientos. Se leen los movimientos y se comparan con tus facturas, suscripciones, pagos de Amazon y movimientos registrados.");
+  const cardSel = h("select", { name: "card_id", required: true }, h("option", { value: "" }, "Elige la cuenta o tarjeta"), cards.map((c) => h("option", { value: c.id, selected: opts.cardId === c.id }, cardText(c))));
+  const isCredit = () => (cards.find((c) => c.id === cardSel.value) || {}).card_type !== "debito";
+  const render = () => {
+    if (!lines.length) { list.replaceChildren(); return; }
+    const outN = lines.filter((l) => l.on && l.amount < 0).length, inN = lines.filter((l) => l.on && l.amount > 0).length;
+    list.replaceChildren(
+      h("div", { class: "row between" }, h("b", { class: "small" }, `${lines.length} movimientos leídos · ${outN} salidas · ${inN} entradas`),
+        h("button", { class: "linkbtn small", type: "button", onclick: () => { lines.forEach((l) => { l.amount = -l.amount; }); render(); } }, "¿Signos al revés? Invertir")),
+      h("div", { class: "tablewrap", style: "max-height:42vh;overflow:auto" }, h("table", { style: "min-width:520px" }, h("thead", null, h("tr", null, ["", "Fecha", "Descripción", "Monto"].map((c) => h("th", null, c)))),
+        h("tbody", null, lines.map((l) => h("tr", { style: l.on ? "" : "opacity:.45" }, h("td", null, h("input", { type: "checkbox", checked: l.on, style: "width:auto", "aria-label": "Incluir", onchange: (e) => { l.on = e.target.checked; render(); } })),
+          h("td", { class: "mono" }, fdate(l.posted_on)), h("td", { class: "small" }, l.description), h("td", { class: "mono", style: `color:var(${l.amount < 0 ? "--ink" : "--ok"})` }, (l.amount < 0 ? "−" : "+") + money(Math.abs(l.amount)))))))),
+      h("p", { class: "small muted", style: "margin:0" }, "Quita la marca a lo que no quieras guardar. Revisa que las compras salgan con − y los depósitos o pagos con +."));
+  };
+  const read = async (f) => {
+    if (!cardSel.value) { info.textContent = "Primero elige la cuenta o tarjeta del extracto."; return; }
+    file = f; lines = []; render(); info.textContent = "Leyendo el extracto…";
+    const dmy = ent.id === "sas", credit = isCredit();
+    try {
+      let got = [];
+      if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") {
+        const tl = await pdfTextLines(f).catch(() => []);
+        got = bankFromPdf(tl, { credit, dmy });
+        if (got.length < 2) {
+          info.textContent = "El PDF no trae los movimientos en un formato claro. Leyéndolo con IA (tarda unos segundos)…";
+          const prep = tl.join("\n").trim().length > 80 ? { text: tl.join("\n") } : await prepareUpload(f);
+          got = (await api("/bank/read", { method: "POST", body: { text: prep.text, image: prep.text ? null : prep.image } })).lines;
+        }
+      } else if (/\.(csv|txt|tsv|xlsx|xls)$/i.test(f.name)) {
+        const r = bankFromRows(await readRows(f), { dmy });
+        if (!r) throw new Error("No encontré las columnas de fecha y monto en el archivo.");
+        got = r.lines;
+        if (r.single && credit) { const pays = got.filter((l) => PAY_RE.test(l.description)); const flip = pays.length ? pays.filter((l) => l.amount < 0).length > pays.length / 2 : got.filter((l) => l.amount > 0).length > got.length * 0.6; if (flip) got.forEach((l) => { l.amount = -l.amount; }); }
+      } else if (f.type.startsWith("image/")) {
+        info.textContent = "Leyendo la foto con IA…";
+        const prep = await prepareUpload(f); file = prep.file;
+        got = (await api("/bank/read", { method: "POST", body: { image: prep.image } })).lines;
+      } else throw new Error("Sube un PDF, CSV, Excel o foto del extracto.");
+      lines = got.map((l) => ({ ...l, on: true }));
+      info.textContent = lines.length ? "Listo. Revisa los movimientos y guarda." : "No encontré movimientos en el archivo. Prueba con el CSV o Excel que descarga el banco.";
+      render();
+    } catch (e) { info.textContent = e.message; }
+  };
+  const dlg = modal("Leer extracto del banco", () => h("div", { class: "stack" },
+    fld("Cuenta o tarjeta", cardSel),
+    opts.file ? h("p", { class: "small", style: "margin:0" }, "Archivo: ", h("b", null, opts.file.name)) : fld("Archivo (PDF, CSV, Excel o foto)", h("input", { type: "file", accept: "application/pdf,.csv,.txt,.tsv,.xlsx,.xls,image/*", onchange: (e) => e.target.files[0] && read(e.target.files[0]) })),
+    info, list,
+    !cards.length ? h("p", { class: "small", style: "margin:0;color:var(--warn)" }, "Primero agrega la cuenta o tarjeta en la pestaña Tarjetas.") : ""),
+  async (fd, form) => {
+    const keep = lines.filter((l) => l.on);
+    if (!keep.length) throw new Error("No hay movimientos para guardar.");
+    const up = new FormData(); up.append("entity_id", ent.id); up.append("card_id", cardSel.value); up.append("lines", JSON.stringify(keep.map(({ posted_on, description, amount }) => ({ posted_on, description, amount }))));
+    if (fileId) up.append("file_id", fileId);
+    else if (file) { form.querySelector("[type=submit]").textContent = "Guardando…"; const prep = file.type.startsWith("image/") || file.type === "application/pdf" ? await prepareUpload(file) : { file, originalSize: file.size }; up.append("file", prep.file); up.append("original_size", prep.originalSize); }
+    const r = await api("/bank/lines", { method: "POST", body: up });
+    toast(`${r.added} movimiento(s) guardados${r.duplicates ? ` (${r.duplicates} ya estaban)` : ""}: ${r.matched} con soporte y ${r.missing} sin soporte.`, !!r.missing); route();
+  }, "Guardar y conciliar");
+  if (opts.file) { dlg.addEventListener("close", () => route()); setTimeout(() => read(opts.file), 50); }
+}
+const BANK_ST = { conciliado: ["Con soporte", "ok"], sin_soporte: ["Sin soporte", "warn"], personal: ["Personal", ""], ignorado: ["Ignorado", ""] };
+function bankHint(l) {
+  if (l.amount > 0 && /amazon/i.test(l.description)) return "Parece un depósito de Amazon: sube el reporte de liquidación o regístralo en Lotes.";
+  if (l.amount < 0 && /(fee|cargo|comisi|maintenance|service charge)/i.test(l.description)) return "Parece una comisión del banco.";
+  if (l.amount < 0 && /(atm|cash|retiro|withdrawal)/i.test(l.description)) return "Si fue para ti, regístralo como Retiro del dueño.";
+  return "";
+}
+async function pickInvoiceDialog(ent, l) {
+  const today = l.posted_on; const from = new Date(Date.parse(today) - 120 * 864e5).toISOString().slice(0, 10);
+  const { invoices } = await api(`/accounting?entity=${ent.id}&from=${from}&to=${today}`);
+  const A = Math.abs(l.amount);
+  const list = invoices.filter((i) => i.kind !== "nota de crédito").sort((a, z) => Math.abs((a.total || 0) - A) - Math.abs((z.total || 0) - A)).slice(0, 40);
+  modal("Asignar factura", () => h("div", { class: "stack" },
+    h("p", { class: "small", style: "margin:0" }, `${l.description} · ${fdate(l.posted_on)} · ${money(A)}`),
+    list.length ? h("div", { class: "stack", style: "gap:4px;max-height:46vh;overflow:auto" }, list.map((i, k) => h("label", { class: "row", style: "gap:10px;padding:4px" }, h("input", { type: "radio", name: "inv", value: i.id, required: true, checked: k === 0, style: "width:auto" }),
+      h("span", { class: "small" }, [i.supplier, i.invoice_number].filter(Boolean).join(" · ") || "Factura", ` · ${fdate(i.issue_date)} · `, h("b", null, money(i.total, i.currency)))))) : h("p", { class: "empty" }, "No hay facturas en los últimos 4 meses.")),
+  async (fd) => { await api("/bank/lines/" + l.id, { method: "PUT", body: { status: "conciliado", match_kind: "factura", match_id: fd.get("inv") } }); toast("Factura asignada."); route(); }, "Asignar");
+}
+function bankSection(ent, d) {
+  const L = d.bank; const cnt = (st) => L.filter((l) => l.status === st).length;
+  const miss = L.filter((l) => l.status === "sin_soporte");
+  const setSt = async (l, status, msg) => { await api("/bank/lines/" + l.id, { method: "PUT", body: { status } }); toast(msg); route(); };
+  const acct = (l) => (l.card ? `${l.card} •••• ${l.last4}` : "");
+  return h("section", { class: "card stack" },
+    h("div", { class: "row between" }, h("div", null, h("h2", null, "Conciliación del banco"), h("span", { class: "small muted" }, "Cada movimiento del extracto con su soporte: factura, suscripción, pago de Amazon, declaración o movimiento registrado.")),
+      h("button", { class: "btn primary sm only-upload", type: "button", onclick: () => bankImportDialog(ent) }, "Leer extracto del banco")),
+    L.length ? h("div", { class: "chips" }, pill(`${L.length} movimientos`), pill(`${cnt("conciliado")} con soporte`, "ok"), cnt("sin_soporte") ? pill(`${cnt("sin_soporte")} sin soporte`, "warn") : "", cnt("personal") ? pill(`${cnt("personal")} personales`) : "", cnt("ignorado") ? pill(`${cnt("ignorado")} ignorados`) : "")
+      : h("p", { class: "empty" }, "Todavía no hay extractos leídos en este período."),
+    miss.length ? h("div", { class: "stack", style: "gap:8px" }, h("b", { class: "small" }, "Sin soporte: dime qué es cada uno"),
+      h("div", { class: "stack", style: "gap:0;border-top:1px solid var(--line)" }, miss.map((l) => h("div", { class: "stack", style: "gap:6px;padding:10px 4px;border-bottom:1px solid var(--line);text-align:left;align-items:stretch" },
+        h("div", { class: "row between", style: "align-items:flex-start" }, h("span", { class: "stack", style: "gap:2px" }, h("b", { style: "color:var(--ink)" }, l.description), h("span", { class: "small muted" }, [fdate(l.posted_on), acct(l)].filter(Boolean).join(" · ")), bankHint(l) ? h("span", { class: "small", style: "color:var(--warn)" }, bankHint(l)) : ""),
+          h("b", { class: "mono", style: l.amount > 0 ? "color:var(--ok)" : "" }, (l.amount < 0 ? "−" : "+") + money(Math.abs(l.amount)))),
+        h("div", { class: "row only-upload", style: "gap:12px;flex-wrap:wrap" },
+          h("button", { class: "linkbtn small", type: "button", onclick: () => moveDialog(ent, l) }, l.amount < 0 ? "Registrar gasto o retiro" : "Registrar ingreso o aporte"),
+          l.amount < 0 ? h("button", { class: "linkbtn small", type: "button", onclick: () => pickInvoiceDialog(ent, l) }, "Es de una factura") : "",
+          l.amount < 0 ? h("a", { class: "small", href: `#/empresa/${ent.id}/suscripciones`, style: "font-weight:700" }, "Es una suscripción") : "",
+          h("button", { class: "linkbtn small only-admin", type: "button", onclick: () => setSt(l, "personal", "Marcado como personal.") }, "Es personal"),
+          h("button", { class: "linkbtn small only-admin", type: "button", onclick: () => setSt(l, "ignorado", "Ignorado.") }, "Ignorar")))))) : "",
+    L.length ? h("details", null, h("summary", { class: "small", style: "cursor:pointer;font-weight:700" }, "Ver todos los movimientos del banco"),
+      h("div", { class: "tablewrap", style: "margin-top:8px" }, h("table", { style: "min-width:640px" }, h("thead", null, h("tr", null, ["Fecha", "Descripción", "Monto", "Estado", "Soporte", ""].map((c) => h("th", null, c)))),
+        h("tbody", null, L.map((l) => h("tr", null, h("td", { class: "mono" }, fdate(l.posted_on)), h("td", { class: "small" }, l.description, acct(l) ? h("div", { class: "muted" }, acct(l)) : ""),
+          h("td", { class: "mono" }, (l.amount < 0 ? "−" : "+") + money(Math.abs(l.amount))), h("td", null, pill(...BANK_ST[l.status])), h("td", { class: "small" }, l.match_label || "—"),
+          h("td", { class: "only-admin" }, l.locked ? h("button", { class: "linkbtn small", type: "button", onclick: () => setSt(l, "sin_soporte", "Listo: vuelve a buscar su soporte.") }, "Deshacer") : h("button", { class: "linkbtn small", type: "button", style: "color:var(--bad)", onclick: () => confirmDelete("Quitar movimiento", "Se quita esta línea del extracto leído. El archivo del extracto no se borra.", async () => { await api("/bank/lines/" + l.id, { method: "DELETE" }); route(); }) }, "Quitar")))))))) : "");
+}
+
+// ---------- liquidaciones de Amazon ----------
+const SETT_LABEL = {
+  ventas: "Ventas de productos", envios_cobrados: "Envíos cobrados al cliente", impuesto_cobrado: "Impuesto de venta cobrado al cliente", impuesto_retenido: "Impuesto retenido y pagado por Amazon",
+  promociones: "Promociones y descuentos", reembolsos: "Reembolsos a clientes", comision: "Comisión de Amazon (referral)", tarifas_fba: "Tarifas de FBA (envío al cliente)",
+  almacenamiento: "Almacenamiento en bodegas de Amazon", envio_a_amazon: "Envío y colocación en bodegas de Amazon", publicidad: "Publicidad", suscripcion_vendedor: "Suscripción de vendedor",
+  reembolsos_amazon: "Reembolsos de Amazon (inventario perdido o dañado)", reserva: "Reserva retenida", otros: "Otros cargos y ajustes",
+};
+function settKeyFor(text) {
+  if (/storage/i.test(text)) return "almacenamiento";
+  if (/inbound|transportation|placement|carrier/i.test(text)) return "envio_a_amazon";
+  if (/subscription/i.test(text)) return "suscripcion_vendedor";
+  if (/advertis/i.test(text)) return "publicidad";
+  if (/reserve/i.test(text)) return "reserva";
+  if (/reimburs|reversal|lost|damaged|warehouse/i.test(text)) return "reembolsos_amazon";
+  return "otros";
+}
+function parseSettlement(rows) {
+  const lc = rows.map((r) => r.map((c) => c.toLowerCase()));
+  // Archivo plano V2 de liquidación
+  let hi = lc.findIndex((r) => r.includes("settlement-id") && r.includes("amount-type"));
+  if (hi >= 0) {
+    const H = lc[hi], ix = (n) => H.indexOf(n), R = rows.slice(hi + 1);
+    const first = R.find((r) => r[ix("total-amount")]) || R[0]; if (!first) return null;
+    const bd = {}; const add = (k, v) => { if (v) bd[k] = (bd[k] || 0) + v; };
+    for (const r of R) {
+      const tt = r[ix("transaction-type")] || "", at = r[ix("amount-type")] || "", ad = r[ix("amount-description")] || "", v = parseMoney(r[ix("amount")]) || 0;
+      if (!v) continue;
+      const refund = /refund|chargeback/i.test(tt);
+      if (/^itemprice$/i.test(at)) add(/tax/i.test(ad) ? "impuesto_cobrado" : /shipping/i.test(ad) ? (refund ? "reembolsos" : "envios_cobrados") : refund ? "reembolsos" : "ventas", v);
+      else if (/withheld/i.test(at)) add("impuesto_retenido", v);
+      else if (/promotion/i.test(at)) add("promociones", v);
+      else if (/itemfees/i.test(at)) add(/fba|fulfil|pick|weight|handling/i.test(ad) ? "tarifas_fba" : "comision", v);
+      else add(settKeyFor(`${tt} ${at} ${ad}`), v);
+    }
+    const total = parseMoney(first[ix("total-amount")]), dep = parseAnyDate(first[ix("deposit-date")]);
+    return { kind: "liquidacion", ref: first[ix("settlement-id")], period_start: parseAnyDate(first[ix("settlement-start-date")]), period_end: parseAnyDate(first[ix("settlement-end-date")]), deposit_date: dep, currency: first[ix("currency")] || "USD", total, breakdown: bd, transfers: total > 0 && dep ? [{ date: dep, amount: total }] : [] };
+  }
+  // Reporte de transacciones por fechas (CSV de Pagos › Repositorio de informes)
+  hi = lc.findIndex((r) => r.includes("settlement id") && r.includes("total") && r.includes("type"));
+  if (hi >= 0) {
+    const H = lc[hi], ix = (n) => H.indexOf(n), val = (r, n) => (ix(n) >= 0 ? parseMoney(r[ix(n)]) || 0 : 0);
+    const bd = {}; const add = (k, v) => { if (v) bd[k] = (bd[k] || 0) + v; };
+    const transfers = []; let net = 0, min = null, max = null;
+    for (const r of rows.slice(hi + 1)) {
+      const d = parseAnyDate(r[ix("date/time")]); if (!d) continue;
+      const t = r[ix("type")] || "", desc = r[ix("description")] || "", tot = val(r, "total");
+      if (!min || d < min) min = d; if (!max || d > max) max = d;
+      if (/transfer/i.test(t)) { if (tot < 0) transfers.push({ date: d, amount: -tot }); continue; }
+      net += tot;
+      const sales = val(r, "product sales") + val(r, "gift wrap credits");
+      add(/refund|chargeback/i.test(t) ? "reembolsos" : "ventas", sales);
+      add(/refund/i.test(t) ? "reembolsos" : "envios_cobrados", val(r, "shipping credits"));
+      add("impuesto_cobrado", val(r, "product sales tax") + val(r, "shipping credits tax") + val(r, "giftwrap credits tax") + val(r, "promotional rebates tax"));
+      add("impuesto_retenido", val(r, "marketplace withheld tax"));
+      add("promociones", val(r, "promotional rebates"));
+      add("comision", val(r, "selling fees"));
+      add("tarifas_fba", val(r, "fba fees"));
+      const other = val(r, "other transaction fees") + val(r, "other") + val(r, "regulatory fee") + val(r, "tax on regulatory fee");
+      add(/^order$/i.test(t) ? "otros" : /fba inventory fee/i.test(t) ? settKeyFor(desc || "storage") : settKeyFor(`${t} ${desc}`), other);
+    }
+    if (!max) return null;
+    return { kind: "transacciones", ref: `Transacciones ${min} a ${max}`, period_start: min, period_end: max, deposit_date: null, currency: "USD", total: Math.round(net * 100) / 100, breakdown: bd, transfers };
+  }
+  return null;
+}
+function settlementDialog(ent) {
+  const bizs = state.businesses.filter((b) => b.entity_id === ent.id && b.kind === "reventa");
+  let data = null, file = null;
+  const out = h("div", { class: "stack", style: "gap:6px" });
+  const info = h("p", { class: "small muted", style: "margin:0" }, "En Seller Central: Pagos › Repositorio de informes. Descarga el reporte de Liquidación (archivo plano V2, .txt) de cada depósito, o el de Transacciones (.csv) del mes. Se separan las ventas, comisiones, tarifas de FBA y reembolsos, y cada depósito queda como pago recibido.");
+  modal("Subir reporte de Amazon", () => h("div", { class: "stack" },
+    bizs.length > 1 ? fld("Negocio", h("select", { name: "business_id" }, bizs.map((b) => h("option", { value: b.id }, b.name)))) : h("input", { type: "hidden", name: "business_id", value: bizs[0]?.id || "amazon" }),
+    fld("Reporte (.txt o .csv)", h("input", { type: "file", accept: ".txt,.tsv,.csv,.xlsx", required: true, onchange: async (e) => {
+      file = e.target.files[0]; data = null; out.replaceChildren(); if (!file) return;
+      try {
+        data = parseSettlement(await readRows(file));
+        if (!data) { info.textContent = "No reconocí el reporte. Debe ser el de Liquidación (archivo plano V2) o el de Transacciones en CSV."; return; }
+        const rows = Object.entries(data.breakdown).filter(([, v]) => Math.abs(v) >= 0.005).sort((a, z) => Object.keys(SETT_LABEL).indexOf(a[0]) - Object.keys(SETT_LABEL).indexOf(z[0]));
+        info.textContent = `Del ${fdate(data.period_start)} al ${fdate(data.period_end)}${data.deposit_date ? " · depósito " + fdate(data.deposit_date) : ""}.`;
+        out.replaceChildren(h("div", { class: "tablewrap" }, h("table", null, h("tbody", null, rows.map(([k, v]) => h("tr", null, h("td", { class: "small" }, SETT_LABEL[k] || k), h("td", { class: "mono", style: "text-align:right" }, money(v, data.currency)))),
+          h("tr", null, h("td", null, h("b", null, data.kind === "liquidacion" ? "Depósito al banco" : "Neto del período")), h("td", { class: "mono", style: "text-align:right" }, h("b", null, money(data.total, data.currency))))))),
+          data.transfers.length ? h("p", { class: "small muted", style: "margin:0" }, `${data.transfers.length} depósito(s) al banco quedarán como pagos recibidos de Amazon (si no estaban ya).`) : "");
+      } catch (err) { info.textContent = err.message; }
+    } })),
+    info, out),
+  async (fd, form) => {
+    if (!data) throw new Error("Elige un reporte válido.");
+    form.querySelector("[type=submit]").textContent = "Guardando…";
+    const up = new FormData(); up.append("business_id", fd.get("business_id")); up.append("data", JSON.stringify(data)); up.append("file", file); up.append("original_size", file.size);
+    const r = await api("/settlements", { method: "POST", body: up });
+    toast("Reporte guardado" + (r.payouts ? ` y ${r.payouts} depósito(s) registrados como pago.` : ".")); route();
+  }, "Guardar");
+}
+function settlementSection(ent, d) {
+  const S = d.settlements;
+  const tot = {}; for (const s of S) for (const [k, v] of Object.entries(s.breakdown)) tot[k] = (tot[k] || 0) + v;
+  const keys = Object.keys(SETT_LABEL).filter((k) => Math.abs(tot[k] || 0) >= 0.005);
+  const hasAmazon = state.businesses.some((b) => b.entity_id === ent.id && b.kind === "reventa");
+  if (!hasAmazon && !S.length) return "";
+  return h("section", { class: "card stack" },
+    h("div", { class: "row between" }, h("div", null, h("h2", null, "Ventas de Amazon"), h("span", { class: "small muted" }, "Del reporte de liquidación: ventas, comisiones, tarifas y reembolsos por separado.")),
+      h("button", { class: "btn primary sm only-upload", type: "button", onclick: () => settlementDialog(ent) }, "Subir reporte de Amazon")),
+    S.length ? h("div", { class: "tablewrap" }, h("table", null, h("tbody", null, keys.map((k) => h("tr", null, h("td", { class: "small" }, SETT_LABEL[k]), h("td", { class: "mono", style: "text-align:right" }, money(tot[k])))),
+      h("tr", null, h("td", null, h("b", null, "Neto que Amazon te dejó")), h("td", { class: "mono", style: "text-align:right" }, h("b", null, money(S.reduce((a, s) => a + (s.total || 0), 0)))))))) : h("p", { class: "empty" }, "No hay reportes de Amazon en este período."),
+    S.length ? h("div", { class: "list" }, S.map((s) => h("div", { class: "row between", style: "padding:8px 12px;border-bottom:1px solid var(--line)" },
+      h("span", { class: "small" }, h("b", null, s.kind === "liquidacion" ? "Liquidación " + s.ref : s.ref), ` · ${fdate(s.period_start)} a ${fdate(s.period_end)}`, s.deposit_date ? ` · depósito ${fdate(s.deposit_date)}` : ""),
+      h("span", { class: "row", style: "gap:10px" }, h("b", { class: "mono small" }, money(s.total, s.currency)), s.file_id ? h("a", { class: "small", href: "/api/files/" + s.file_id, target: "_blank", rel: "noopener" }, "Archivo") : "",
+        h("button", { class: "linkbtn small only-admin", type: "button", style: "color:var(--bad)", onclick: () => confirmDelete("Eliminar reporte", "Se borra el reporte y los pagos que creó. Puedes volver a subirlo.", async () => { await api("/settlements/" + s.id, { method: "DELETE" }); route(); }) }, "Eliminar"))))) : "");
 }
 // ---------- aprobaciones de marca y categoría ----------
 const APR_ST = { por_solicitar: ["Por solicitar", "warn"], solicitada: ["Solicitada", "info"], aprobada: ["Aprobada", "ok"], rechazada: ["Rechazada", "bad"] };

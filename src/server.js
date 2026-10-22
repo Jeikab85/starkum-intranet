@@ -19,7 +19,10 @@ const MIGRATIONS = [
   "ALTER TABLE suppliers ADD COLUMN contact_order INTEGER",
   "ALTER TABLE cards ADD COLUMN card_type TEXT NOT NULL DEFAULT 'credito'",
   "ALTER TABLE invoices ADD COLUMN card_id TEXT", "ALTER TABLE invoices ADD COLUMN card_last4 TEXT", "ALTER TABLE invoices ADD COLUMN lot_id TEXT",
+  "UPDATE money_moves SET kind = 'retiro' WHERE kind = 'transferencia' AND category = 'Retiro del dueño'",
+  "UPDATE money_moves SET kind = 'aporte' WHERE kind = 'transferencia' AND category = 'Aporte del dueño'",
 ];
+const MOVE_KINDS = ["ingreso", "gasto", "retiro", "aporte", "transferencia"];
 const LOGO_URL = "https://starkumholdings.com/wp-content/uploads/2026/08/starkum-holdings-logo.png";
 const FOLDERS = ["Legales", "Fiscales", "Bancarios", "Licencias y permisos", "Contratos", "Impuestos por año"];
 
@@ -93,6 +96,98 @@ async function seed(env) {
   await env.DB.batch(q);
 }
 
+// ---------- suscripciones, conciliación bancaria y liquidaciones ----------
+const pad2 = (x) => String(x).padStart(2, "0");
+function addMonthsClamp(iso, k, day) {
+  const [y, m] = iso.split("-").map(Number);
+  const t = new Date(Date.UTC(y, m - 1 + k, 1));
+  const last = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate();
+  return `${t.getUTCFullYear()}-${pad2(t.getUTCMonth() + 1)}-${pad2(Math.min(day, last))}`;
+}
+// Fechas de cobro de una suscripción dentro de [from, to]
+function subCharges(s, from, to) {
+  const out = []; const day = Number(s.charge_date.slice(8, 10)); const step = s.cycle === "anual" ? 12 : 1;
+  for (let k = 0; k < 600; k++) {
+    const d = addMonthsClamp(s.charge_date, k * step, day);
+    if (d > to || (s.ended_on && d > s.ended_on)) break;
+    if (d >= from) out.push(d);
+  }
+  return out;
+}
+const nextCharge = (s, today) => (s.ended_on && s.ended_on < today ? null : subCharges(s, today, "9999-12-31")[0] || null);
+const shiftDate = (iso, days) => new Date(Date.parse(iso + "T00:00:00Z") + days * 864e5).toISOString().slice(0, 10);
+const dayDiff = (a, b) => Math.abs(Date.parse(a + "T00:00:00Z") - Date.parse(b + "T00:00:00Z")) / 864e5;
+const CARD_PAYMENT_RE = /(payment|pymt|pmt|autopay|thank you|pago)/i;
+const words = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
+
+// Empareja cada movimiento del banco con su soporte: factura, suscripción, pago de Amazon, movimiento registrado o declaración
+async function reconcile(env, ent, from, to) {
+  const lines = (await env.DB.prepare("SELECT bl.*, c.card_type FROM bank_lines bl LEFT JOIN cards c ON c.id = bl.card_id WHERE bl.entity_id = ? AND bl.posted_on BETWEEN ? AND ? ORDER BY bl.posted_on").bind(ent, from, to).all()).results;
+  if (!lines.length) return;
+  const wf = shiftDate(from, -40), wt = shiftDate(to, 15);
+  const [invs, pays, moves, subs, taxes, used] = await Promise.all([
+    env.DB.prepare("SELECT i.id, i.total, i.issue_date, i.card_id, COALESCE(s.name, i.supplier_name) AS supplier, i.invoice_number FROM invoices i JOIN businesses b ON b.id = i.business_id LEFT JOIN suppliers s ON s.id = i.supplier_id WHERE b.entity_id = ? AND i.kind != 'nota de crédito' AND i.total > 0 AND COALESCE(i.issue_date, substr(i.created_at,1,10)) BETWEEN ? AND ?").bind(ent, wf, wt).all(),
+    env.DB.prepare("SELECT p.id, p.amount, p.paid_on, b.name AS business FROM payouts p JOIN businesses b ON b.id = p.business_id WHERE b.entity_id = ? AND p.paid_on BETWEEN ? AND ?").bind(ent, wf, wt).all(),
+    env.DB.prepare("SELECT id, kind, amount, moved_on, concept, card_id FROM money_moves WHERE entity_id = ? AND moved_on BETWEEN ? AND ?").bind(ent, wf, wt).all(),
+    env.DB.prepare("SELECT * FROM subscriptions WHERE entity_id = ?").bind(ent).all(),
+    env.DB.prepare("SELECT tp.id, tp.amount, tp.filed_on, tp.due_date, tp.label, o.name AS obligation FROM tax_periods tp JOIN tax_obligations o ON o.id = tp.obligation_id WHERE o.entity_id = ? AND tp.amount > 0").bind(ent).all(),
+    env.DB.prepare("SELECT id, match_kind, match_id FROM bank_lines WHERE entity_id = ? AND match_id IS NOT NULL").bind(ent).all(),
+  ]);
+  const taken = new Set(used.results.filter((u) => lines.every((l) => l.id !== u.id) || lines.find((l) => l.id === u.id).locked).map((u) => u.match_kind + ":" + u.match_id));
+  const charges = subs.results.flatMap((s) => subCharges(s, wf, wt).map((d) => ({ id: s.id + "@" + d, date: d, s })));
+  const near = (a, b) => Math.abs(a - b) <= 0.011;
+  const ups = [];
+  for (const l of lines) {
+    if (l.locked) continue;
+    const A = Math.abs(l.amount), out = l.amount < 0, free = (k, id) => !taken.has(k + ":" + id);
+    let hit = null;
+    const pick = (k, list, label) => { if (list.length) { const x = list[0]; hit = { kind: k, id: x.id, label: label(x) }; } };
+    if (out) {
+      pick("factura", invs.results.filter((i) => free("factura", i.id) && near(i.total, A) && i.issue_date && dayDiff(i.issue_date, l.posted_on) <= 12 && Date.parse(l.posted_on) >= Date.parse(i.issue_date) - 3 * 864e5)
+        .sort((a, z) => (z.card_id === l.card_id) - (a.card_id === l.card_id) || dayDiff(a.issue_date, l.posted_on) - dayDiff(z.issue_date, l.posted_on)), (i) => `Factura ${[i.supplier, i.invoice_number].filter(Boolean).join(" ")}`);
+      if (!hit) {
+        const dw = words(l.description);
+        pick("suscripcion", charges.filter((c) => free("suscripcion", c.id) && ((Math.abs(c.s.amount - A) <= Math.max(1, c.s.amount * 0.1) && dayDiff(c.date, l.posted_on) <= 5) || (words(c.s.name).some((w) => dw.some((x) => x.startsWith(w) || w.startsWith(x))) && dayDiff(c.date, l.posted_on) <= 8 && Math.abs(c.s.amount - A) <= c.s.amount * 0.35)))
+          .sort((a, z) => dayDiff(a.date, l.posted_on) - dayDiff(z.date, l.posted_on)), (c) => `Suscripción ${c.s.name}`);
+      }
+      if (!hit) pick("movimiento", moves.results.filter((x) => free("movimiento", x.id) && x.kind !== "ingreso" && x.kind !== "aporte" && near(x.amount, A) && dayDiff(x.moved_on, l.posted_on) <= 6).sort((a, z) => (z.card_id === l.card_id) - (a.card_id === l.card_id)), (x) => x.concept);
+      if (!hit) pick("impuesto", taxes.results.filter((t) => free("impuesto", t.id) && near(t.amount, A) && dayDiff(t.filed_on || t.due_date, l.posted_on) <= 20), (t) => `${t.obligation} ${t.label}`);
+      if (!hit && l.card_type === "debito" && /(card|crd|credit|visa|mastercard|amex|discover|chase|capital one|citi|u\.?s\.? bank)/i.test(l.description) && CARD_PAYMENT_RE.test(l.description)) hit = { kind: "pago_tarjeta", id: null, label: "Pago a tarjeta de crédito (no es gasto)" };
+    } else {
+      if (l.card_type !== "debito" && l.card_id && CARD_PAYMENT_RE.test(l.description)) hit = { kind: "pago_tarjeta", id: null, label: "Pago de la tarjeta (no es ingreso)" };
+      if (!hit) pick("pago_amazon", pays.results.filter((x) => free("pago_amazon", x.id) && near(x.amount, A) && dayDiff(x.paid_on, l.posted_on) <= 7), (x) => `Pago de ${x.business}`);
+      if (!hit) pick("movimiento", moves.results.filter((x) => free("movimiento", x.id) && x.kind !== "gasto" && x.kind !== "retiro" && near(x.amount, A) && dayDiff(x.moved_on, l.posted_on) <= 6), (x) => x.concept);
+    }
+    if (hit && hit.id) taken.add(hit.kind + ":" + hit.id);
+    const status = hit ? "conciliado" : "sin_soporte";
+    if (status !== l.status || (hit?.kind || null) !== l.match_kind || (hit?.id || null) !== l.match_id || (hit?.label || null) !== l.match_label)
+      ups.push(env.DB.prepare("UPDATE bank_lines SET status = ?, match_kind = ?, match_id = ?, match_label = ? WHERE id = ?").bind(status, hit?.kind || null, hit?.id || null, hit?.label || null, l.id));
+  }
+  for (let i = 0; i < ups.length; i += 80) await env.DB.batch(ups.slice(i, i + 80));
+}
+const BANK_PROMPT = `Eres un lector de extractos bancarios y estados de cuenta de tarjetas. Extrae SOLO los movimientos (transacciones) y responde SOLO con un objeto JSON válido, sin texto adicional:
+{"period_end":"AAAA-MM-DD","lines":[{"date":"AAAA-MM-DD","description":"","amount":0,"direction":"sale|entra"}]}
+"sale" = compra, cargo, retiro, comisión, cheque o pago hecho desde la cuenta. "entra" = depósito, abono, reembolso o pago recibido en la tarjeta. amount siempre positivo y sin símbolos.
+No incluyas saldos, totales, resúmenes ni intereses calculados. Nunca escribas números completos de tarjetas o cuentas. Si un dato no aparece, omite esa línea.`;
+async function readBank(env, { text, image }) {
+  if (!env.AI && env.DEV === "1") return { period_end: "2026-09-30", lines: [{ date: "2026-09-05", description: "KEEPA.COM SUBSCRIPTION (PRUEBA)", amount: 21, direction: "sale" }, { date: "2026-09-12", description: "AMAZON PAYMENTS DEPOSIT (PRUEBA)", amount: 310.4, direction: "entra" }] };
+  if (!env.AI) throw new Error("La lectura automática no está activada.");
+  const model = env.AI_MODEL || "@cf/meta/llama-4-scout-17b-16e-instruct";
+  const chunks = []; const t = String(text || "");
+  for (let i = 0; i < t.length && chunks.length < 4; i += 9000) chunks.push(t.slice(i, i + 9000));
+  if (!chunks.length) chunks.push("");
+  const all = []; let period_end = null;
+  for (const ch of chunks) {
+    const content = [{ type: "text", text: BANK_PROMPT + (ch ? "\n\nTexto del extracto:\n" + ch : "") }];
+    if (image && !ch) content.push({ type: "image_url", image_url: { url: image } });
+    const out = await env.AI.run(model, { messages: [{ role: "user", content }], max_tokens: 3500, temperature: 0 });
+    const x = parseModelJson(out?.response ?? out?.result?.response ?? out);
+    if (x?.period_end) period_end = isoDate(x.period_end) || period_end;
+    if (Array.isArray(x?.lines)) all.push(...x.lines);
+  }
+  return { period_end, lines: all };
+}
+
 // ---------- roles ----------
 // admin: todo · standard: ver, subir facturas y documentos, revisar lo que sube, enviar a correos autorizados · viewer: ver y descargar
 const ROLES = ["admin", "standard", "viewer"];
@@ -100,6 +195,7 @@ const normRole = (r) => (r === "member" ? "standard" : ROLES.includes(r) ? r : "
 const STANDARD_WRITES = [
   ["POST", /^\/invoices$/], ["POST", /^\/invoices\/[\w-]+\/extract$/], ["PUT", /^\/invoices\/[\w-]+$/],
   ["POST", /^\/docs$/], ["POST", /^\/docs\/[\w-]+\/extract$/], ["POST", /^\/tax\/periods\/[\w-]+\/file$/], ["POST", /^\/records$/], ["POST", /^\/send$/], ["POST", /^\/scan\/logs$/], ["POST", /^\/lots$/], ["POST", /^\/moves$/],
+  ["POST", /^\/subs$/], ["POST", /^\/bank\/read$/], ["POST", /^\/bank\/lines$/], ["POST", /^\/settlements$/],
 ];
 function permissionError(role, method, path) {
   if (method === "GET" || path === "/auth/logout" || role === "admin") return null;
@@ -889,9 +985,9 @@ async function api(req, env, url, user) {
     const cyc = await env.DB.prepare("SELECT file_id FROM card_cycles WHERE id = ?").bind(mm[1]).first();
     if (!cyc) return fail("Ciclo no encontrado.", 404);
     const fileId = await storeFile(env, user, fd.get("file"), fd.get("original_size"));
-    if (cyc.file_id) await removeFile(cyc.file_id);
+    if (cyc.file_id) { await env.DB.prepare("UPDATE bank_lines SET file_id = ? WHERE file_id = ?").bind(fileId, cyc.file_id).run(); await removeFile(cyc.file_id); }
     await env.DB.prepare("UPDATE card_cycles SET file_id = ? WHERE id = ?").bind(fileId, mm[1]).run();
-    return json({ ok: true });
+    return json({ ok: true, file_id: fileId });
   }
 
   // Aprobaciones de marca y categoría
@@ -960,19 +1056,139 @@ async function api(req, env, url, user) {
   }
   if (p === "/moves" && m === "POST") {
     const fd = await req.formData(); const g = (k) => { const v = fd.get(k); return v == null || v === "" ? null : String(v); };
-    const kind = ["ingreso", "gasto", "transferencia"].includes(g("kind")) ? g("kind") : null;
+    const kind = MOVE_KINDS.includes(g("kind")) ? g("kind") : null;
     const amount = num(g("amount")); const date = isoDate(g("moved_on"));
     if (!kind || !amount || !date || !g("concept") || !["llc", "sas"].includes(g("entity_id"))) return fail("Completa tipo, fecha, monto y concepto.");
     const file = fd.get("file");
     const fileId = file && file.size ? await storeFile(env, user, file, fd.get("original_size")) : null;
+    const moveId = uid();
     await env.DB.prepare("INSERT INTO money_moves (id, entity_id, kind, moved_on, amount, currency, concept, category, card_id, business_id, file_id, notes, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-      .bind(uid(), g("entity_id"), kind, date, Math.abs(amount), (g("currency") || "USD").toUpperCase().slice(0, 3), g("concept").slice(0, 200), g("category"), g("card_id"), g("business_id"), fileId, g("notes"), user.email, now()).run();
-    return json({ ok: true });
+      .bind(moveId, g("entity_id"), kind, date, Math.abs(amount), (g("currency") || "USD").toUpperCase().slice(0, 3), g("concept").slice(0, 200), g("category"), g("card_id"), g("business_id"), fileId, g("notes"), user.email, now()).run();
+    if (g("bank_line_id")) await env.DB.prepare("UPDATE bank_lines SET status = 'conciliado', match_kind = 'movimiento', match_id = ?, match_label = ?, locked = 1 WHERE id = ?").bind(moveId, g("concept").slice(0, 200), g("bank_line_id")).run();
+    return json({ ok: true, id: moveId });
   }
   if ((mm = p.match(/^\/moves\/([\w-]+)$/)) && m === "DELETE") {
     const mv = await env.DB.prepare("SELECT file_id FROM money_moves WHERE id = ?").bind(mm[1]).first();
     if (mv?.file_id) await removeFile(mv.file_id);
     await env.DB.prepare("DELETE FROM money_moves WHERE id = ?").bind(mm[1]).run();
+    await env.DB.prepare("UPDATE bank_lines SET status = 'sin_soporte', match_kind = NULL, match_id = NULL, match_label = NULL, locked = 0 WHERE match_kind = 'movimiento' AND match_id = ?").bind(mm[1]).run();
+    return json({ ok: true });
+  }
+
+  // Suscripciones (por plataforma o generales de la empresa)
+  if (p === "/subs" && m === "GET") {
+    const ent = url.searchParams.get("entity"); const biz = url.searchParams.get("business");
+    const rows = (await env.DB.prepare(`SELECT s.*, c.nickname AS card, c.last4, c.card_type, b.name AS business FROM subscriptions s LEFT JOIN cards c ON c.id = s.card_id LEFT JOIN businesses b ON b.id = s.business_id WHERE ${biz ? "s.business_id = ?" : "s.entity_id = ?"} ORDER BY s.ended_on IS NOT NULL, b.name, s.name`).bind(biz || ent).all()).results;
+    const today = new Date().toISOString().slice(0, 10);
+    return json({ subs: rows.map((s) => ({ ...s, next_charge: nextCharge(s, today), active: !s.ended_on || s.ended_on >= today })) });
+  }
+  if ((p === "/subs" && m === "POST") || ((mm = p.match(/^\/subs\/([\w-]+)$/)) && m === "PUT")) {
+    const b = await body();
+    const amount = num(b.amount); const date = isoDate(b.charge_date);
+    if (!String(b.name || "").trim() || !amount || !date) return fail("Completa el nombre, el valor y la fecha de cobro.");
+    let ent = b.entity_id;
+    if (b.business_id) ent = (await env.DB.prepare("SELECT entity_id FROM businesses WHERE id = ?").bind(b.business_id).first())?.entity_id || ent;
+    if (!["llc", "sas"].includes(ent)) return fail("Elige la empresa.");
+    const v = [ent, b.business_id || null, String(b.name).trim().slice(0, 120), String(b.url || "").trim() || null, Math.abs(amount), (b.currency || "USD").toUpperCase().slice(0, 3), b.cycle === "anual" ? "anual" : "mensual", date, isoDate(b.ended_on), b.card_id || null, b.use_kind === "mixto" ? "mixto" : "empresa", b.notes || null];
+    if (mm) await env.DB.prepare("UPDATE subscriptions SET entity_id=?, business_id=?, name=?, url=?, amount=?, currency=?, cycle=?, charge_date=?, ended_on=?, card_id=?, use_kind=?, notes=? WHERE id = ?").bind(...v, mm[1]).run();
+    else await env.DB.prepare("INSERT INTO subscriptions (entity_id, business_id, name, url, amount, currency, cycle, charge_date, ended_on, card_id, use_kind, notes, id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(...v, uid(), now()).run();
+    return json({ ok: true });
+  }
+  if ((mm = p.match(/^\/subs\/([\w-]+)$/)) && m === "DELETE") {
+    await env.DB.prepare("DELETE FROM subscriptions WHERE id = ?").bind(mm[1]).run();
+    await env.DB.prepare("UPDATE bank_lines SET status = 'sin_soporte', match_kind = NULL, match_id = NULL, match_label = NULL, locked = 0 WHERE match_kind = 'suscripcion' AND match_id LIKE ?").bind(mm[1] + "@%").run();
+    return json({ ok: true });
+  }
+
+  // Extractos del banco: lectura con IA (respaldo cuando el PDF no se puede leer en el navegador), guardado y conciliación
+  if (p === "/bank/read" && m === "POST") {
+    const b = await body();
+    const x = await readBank(env, { text: b.text, image: b.image });
+    const lines = (x.lines || []).map((l) => ({ posted_on: isoDate(l.date), description: String(l.description || "").replace(/\d{9,}/g, (d) => "•••• " + d.slice(-4)).slice(0, 200), amount: Math.abs(num(l.amount) || 0) * (l.direction === "entra" ? 1 : -1) })).filter((l) => l.posted_on && l.amount);
+    return json({ period_end: x.period_end, lines });
+  }
+  if (p === "/bank/lines" && m === "POST") {
+    const fd = await req.formData();
+    const ent = String(fd.get("entity_id") || ""); const cardId = String(fd.get("card_id") || "") || null;
+    if (!["llc", "sas"].includes(ent)) return fail("Elige la empresa.");
+    let lines; try { lines = JSON.parse(String(fd.get("lines") || "[]")); } catch { lines = []; }
+    lines = lines.map((l) => ({ posted_on: isoDate(l.posted_on), description: String(l.description || "").replace(/\d{9,}/g, (d) => "•••• " + d.slice(-4)).trim().slice(0, 200), amount: Math.round((num(l.amount) || 0) * 100) / 100 })).filter((l) => l.posted_on && l.amount && l.description).slice(0, 3000);
+    if (!lines.length) return fail("No hay movimientos para guardar.");
+    let fileId = String(fd.get("file_id") || "") || null;
+    const file = fd.get("file");
+    if (!fileId && file && file.size) fileId = await storeFile(env, user, file, fd.get("original_size"));
+    const existing = (await env.DB.prepare("SELECT posted_on, amount, description FROM bank_lines WHERE entity_id = ? AND COALESCE(card_id,'') = ? AND posted_on BETWEEN ? AND ?")
+      .bind(ent, cardId || "", lines.reduce((a, l) => (l.posted_on < a ? l.posted_on : a), "9999"), lines.reduce((a, l) => (l.posted_on > a ? l.posted_on : a), "0000")).all()).results;
+    const seen = new Set(existing.map((e) => `${e.posted_on}|${e.amount.toFixed(2)}|${e.description}`));
+    const ins = []; let dup = 0;
+    for (const l of lines) {
+      const k = `${l.posted_on}|${l.amount.toFixed(2)}|${l.description}`;
+      if (seen.has(k)) { dup++; continue; } seen.add(k);
+      ins.push(env.DB.prepare("INSERT INTO bank_lines (id, entity_id, card_id, file_id, posted_on, description, amount, created_at) VALUES (?,?,?,?,?,?,?,?)").bind(uid(), ent, cardId, fileId, l.posted_on, l.description, l.amount, now()));
+    }
+    for (let i = 0; i < ins.length; i += 80) await env.DB.batch(ins.slice(i, i + 80));
+    // El archivo queda también como estado de cuenta del ciclo que le corresponde, si ese ciclo no tiene uno
+    if (cardId && fileId) {
+      const last = lines.reduce((a, l) => (l.posted_on > a ? l.posted_on : a), "0000");
+      const cyc = await env.DB.prepare("SELECT id, file_id FROM card_cycles WHERE card_id = ? AND closing_date >= ? ORDER BY closing_date LIMIT 1").bind(cardId, last).first();
+      if (cyc && !cyc.file_id) await env.DB.prepare("UPDATE card_cycles SET file_id = ? WHERE id = ?").bind(fileId, cyc.id).run();
+    }
+    const from = lines.reduce((a, l) => (l.posted_on < a ? l.posted_on : a), "9999"), to = lines.reduce((a, l) => (l.posted_on > a ? l.posted_on : a), "0000");
+    await reconcile(env, ent, from, to);
+    const st = await env.DB.prepare("SELECT SUM(status = 'conciliado') AS ok, SUM(status = 'sin_soporte') AS missing FROM bank_lines WHERE entity_id = ? AND COALESCE(card_id,'') = ? AND posted_on BETWEEN ? AND ?").bind(ent, cardId || "", from, to).first();
+    return json({ added: ins.length, duplicates: dup, matched: st.ok || 0, missing: st.missing || 0 });
+  }
+  if ((mm = p.match(/^\/bank\/lines\/([\w-]+)$/)) && m === "PUT") {
+    const b = await body();
+    const st = ["personal", "ignorado", "sin_soporte", "conciliado"].includes(b.status) ? b.status : null;
+    if (!st) return fail("Estado no válido.");
+    if (st === "sin_soporte") await env.DB.prepare("UPDATE bank_lines SET status = 'sin_soporte', match_kind = NULL, match_id = NULL, match_label = NULL, locked = 0 WHERE id = ?").bind(mm[1]).run();
+    else if (st === "conciliado") {
+      if (b.match_kind !== "factura" || !b.match_id) return fail("Elige la factura.");
+      const i = await env.DB.prepare("SELECT i.invoice_number, COALESCE(s.name, i.supplier_name) AS supplier FROM invoices i LEFT JOIN suppliers s ON s.id = i.supplier_id WHERE i.id = ?").bind(b.match_id).first();
+      if (!i) return fail("Factura no encontrada.", 404);
+      await env.DB.prepare("UPDATE bank_lines SET status = 'conciliado', match_kind = 'factura', match_id = ?, match_label = ?, locked = 1 WHERE id = ?").bind(b.match_id, `Factura ${[i.supplier, i.invoice_number].filter(Boolean).join(" ")}`, mm[1]).run();
+    } else await env.DB.prepare("UPDATE bank_lines SET status = ?, match_kind = NULL, match_id = NULL, match_label = ?, locked = 1 WHERE id = ?").bind(st, st === "personal" ? "Gasto personal (no es de la empresa)" : "Ignorado", mm[1]).run();
+    return json({ ok: true });
+  }
+  if ((mm = p.match(/^\/bank\/lines\/([\w-]+)$/)) && m === "DELETE") {
+    await env.DB.prepare("DELETE FROM bank_lines WHERE id = ?").bind(mm[1]).run();
+    return json({ ok: true });
+  }
+
+  // Liquidaciones de Amazon (reporte de liquidación o de transacciones de Seller Central)
+  if (p === "/settlements" && m === "POST") {
+    const fd = await req.formData();
+    let d; try { d = JSON.parse(String(fd.get("data") || "{}")); } catch { d = {}; }
+    const biz = await env.DB.prepare("SELECT id, entity_id, name FROM businesses WHERE id = ?").bind(String(fd.get("business_id") || "")).first();
+    if (!biz || !biz.entity_id) return fail("Elige el negocio de Amazon (y asígnale una empresa).");
+    const ps = isoDate(d.period_start), pe = isoDate(d.period_end);
+    if (!pe || !d.ref) return fail("No reconocí el reporte. Sube el reporte de liquidación (archivo plano V2) o el de transacciones en CSV.");
+    const over = await env.DB.prepare("SELECT ref, period_start, period_end FROM settlements WHERE business_id = ? AND period_end > ? AND COALESCE(period_start, period_end) < ? LIMIT 1").bind(biz.id, ps || pe, pe).first();
+    if (over) return fail(`Ya subiste un reporte que cubre parte de esas fechas (${over.period_start || ""} a ${over.period_end}). Elimínalo primero para no contar las ventas dos veces.`);
+    const dup = await env.DB.prepare("SELECT id FROM settlements WHERE business_id = ? AND ref = ?").bind(biz.id, String(d.ref)).first();
+    if (dup) return fail("Ese reporte ya estaba subido.");
+    const breakdown = {}; for (const [k, v] of Object.entries(d.breakdown || {})) { const n = num(v); if (n) breakdown[String(k).slice(0, 40)] = Math.round(n * 100) / 100; }
+    const file = fd.get("file"); const fileId = file && file.size ? await storeFile(env, user, file, fd.get("original_size")) : null;
+    // Cada depósito que Amazon hizo al banco queda como pago recibido (si no estaba ya registrado)
+    const payoutIds = [];
+    for (const t of (Array.isArray(d.transfers) ? d.transfers : []).slice(0, 60)) {
+      const amt = Math.abs(num(t.amount) || 0), day = isoDate(t.date); if (!amt || !day) continue;
+      const ex = await env.DB.prepare("SELECT id FROM payouts WHERE business_id = ? AND ABS(amount - ?) < 0.011 AND paid_on BETWEEN ? AND ?").bind(biz.id, amt, shiftDate(day, -5), shiftDate(day, 5)).first();
+      if (ex) continue;
+      const pid = uid(); payoutIds.push(pid);
+      await env.DB.prepare("INSERT INTO payouts (id, business_id, lot_id, paid_on, amount, notes, created_at) VALUES (?,?,NULL,?,?,?,?)").bind(pid, biz.id, day, amt, `Depósito de la liquidación ${String(d.ref).slice(0, 60)}`, now()).run();
+    }
+    await env.DB.prepare("INSERT INTO settlements (id, entity_id, business_id, ref, kind, period_start, period_end, deposit_date, currency, total, breakdown, file_id, payout_ids, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(uid(), biz.entity_id, biz.id, String(d.ref).slice(0, 80), d.kind === "transacciones" ? "transacciones" : "liquidacion", ps, pe, isoDate(d.deposit_date), (d.currency || "USD").toUpperCase().slice(0, 3), num(d.total), JSON.stringify(breakdown), fileId, JSON.stringify(payoutIds), now()).run();
+    return json({ ok: true, payouts: payoutIds.length });
+  }
+  if ((mm = p.match(/^\/settlements\/([\w-]+)$/)) && m === "DELETE") {
+    const s = await env.DB.prepare("SELECT file_id, payout_ids FROM settlements WHERE id = ?").bind(mm[1]).first();
+    if (!s) return fail("No encontrado.", 404);
+    for (const pid of JSON.parse(s.payout_ids || "[]")) await env.DB.prepare("DELETE FROM payouts WHERE id = ?").bind(pid).run();
+    if (s.file_id) await removeFile(s.file_id);
+    await env.DB.prepare("DELETE FROM settlements WHERE id = ?").bind(mm[1]).run();
     return json({ ok: true });
   }
 
@@ -993,7 +1209,16 @@ async function api(req, env, url, user) {
       env.DB.prepare("SELECT d.id, d.folder, d.title, d.issued_on, d.created_at, d.file_id, f.filename FROM company_docs d JOIN files f ON f.id = d.file_id WHERE d.entity_id = ? AND d.folder IN ('Bancarios','Fiscales','Impuestos por año') AND COALESCE(d.issued_on, substr(d.created_at,1,10)) BETWEEN ? AND ? AND d.version = (SELECT MAX(version) FROM company_docs x WHERE x.group_id = d.group_id) ORDER BY d.folder, d.issued_on").bind(ent, from, to).all(),
     ]);
     if (!entity) return fail("Empresa no encontrada.", 404);
-    return json({ entity: { id: entity.id, name: entity.name }, from, to, invoices: invs.results.map((i) => ({ ...i, items: JSON.parse(i.items || "[]") })), payouts: pays.results, tax: tax.results, statements: docs.results, moves: moves.results, docs: cdocs.results });
+    await reconcile(env, ent, from, to);
+    const [subs, bank, setts] = await Promise.all([
+      env.DB.prepare("SELECT s.*, c.nickname AS card, c.last4, b.name AS business FROM subscriptions s LEFT JOIN cards c ON c.id = s.card_id LEFT JOIN businesses b ON b.id = s.business_id WHERE s.entity_id = ?").bind(ent).all(),
+      env.DB.prepare("SELECT bl.*, c.nickname AS card, c.last4, c.card_type, f.filename FROM bank_lines bl LEFT JOIN cards c ON c.id = bl.card_id LEFT JOIN files f ON f.id = bl.file_id WHERE bl.entity_id = ? AND bl.posted_on BETWEEN ? AND ? ORDER BY bl.posted_on, bl.created_at").bind(ent, from, to).all(),
+      env.DB.prepare("SELECT st.*, b.name AS business, f.filename FROM settlements st JOIN businesses b ON b.id = st.business_id LEFT JOIN files f ON f.id = st.file_id WHERE st.entity_id = ? AND st.period_end BETWEEN ? AND ? ORDER BY st.period_end").bind(ent, from, to).all(),
+    ]);
+    const matched = new Map(bank.results.filter((l) => l.match_kind === "suscripcion").map((l) => [l.match_id, l]));
+    const subCh = subs.results.flatMap((s) => subCharges(s, from, to).map((d) => ({ sub_id: s.id, date: d, name: s.name, business: s.business || "General de la empresa", amount: s.amount, currency: s.currency, cycle: s.cycle, use_kind: s.use_kind, card: s.card ? `${s.card} •••• ${s.last4}` : "", url: s.url, bank: matched.get(s.id + "@" + d) || null }))).sort((a, z) => a.date.localeCompare(z.date));
+    return json({ entity: { id: entity.id, name: entity.name }, from, to, invoices: invs.results.map((i) => ({ ...i, items: JSON.parse(i.items || "[]") })), payouts: pays.results, tax: tax.results, statements: docs.results, moves: moves.results, docs: cdocs.results,
+      sub_charges: subCh, bank: bank.results, settlements: setts.results.map((x) => ({ ...x, breakdown: JSON.parse(x.breakdown || "{}") })) });
   }
 
   // Lotes y pagos de Amazon
