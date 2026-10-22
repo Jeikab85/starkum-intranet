@@ -768,6 +768,18 @@ function scanItemDialog(b, it) {
 // ---------- tarjetas ----------
 const NETS = ["Visa", "Mastercard", "American Express", "Discover", "Otra"];
 const CTYPE = { credito: "Crédito", debito: "Débito" };
+// Nombre del banco a partir del emisor de la tarjeta o cuenta
+function bankOf(issuer) {
+  const t = String(issuer || "").trim();
+  if (!t) return "Sin banco";
+  if (/u\.?\s?s\.?\s?bank/i.test(t)) return "U.S. Bank";
+  if (/chase/i.test(t)) return "Chase";
+  return t;
+}
+function byBank(list, get = (x) => x.issuer) {
+  const m = new Map(); for (const x of list) { const k = bankOf(get(x)); if (!m.has(k)) m.set(k, []); m.get(k).push(x); }
+  return [...m.entries()].sort((a, z) => (a[0] === "Sin banco") - (z[0] === "Sin banco") || a[0].localeCompare(z[0]));
+}
 const cardText = (c) => `${c.nickname} · ${CTYPE[c.card_type] || "Crédito"} ${c.network || ""} •••• ${c.last4}`.replace(/\s+/g, " ");
 function cardSelect(cards, selected, emptyLabel) {
   return h("select", { name: "card_id" }, h("option", { value: "" }, emptyLabel), cards.map((c) => h("option", { value: c.id, selected: c.id === selected }, cardText(c))));
@@ -807,7 +819,9 @@ async function cardsView(entityId) {
   return h("div", { class: "stack", style: "gap:14px" },
     h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, "Cada factura se asocia a la tarjeta con que pagaste. Se guardan solo el banco, la red, el tipo, el titular, los últimos 4 dígitos y el vencimiento: nunca el número completo, el código de seguridad ni la foto."),
       h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => cardDialog(null, entityId) }, "+ Agregar tarjeta")),
-    cards.length ? h("div", { class: "stack", style: "gap:14px" }, cards.map((c) => h("section", { class: "card stack" },
+    cards.length ? h("div", { class: "stack", style: "gap:22px" }, byBank(cards).map(([bank, list]) => h("div", { class: "stack", style: "gap:12px" },
+      h("h2", { style: "margin:0" }, bank, h("span", { class: "small muted", style: "font-weight:400" }, ` · ${list.length} ${list.length === 1 ? "cuenta o tarjeta" : "cuentas o tarjetas"}`)),
+      list.map((c) => h("section", { class: "card stack" },
       h("div", { class: "row between", style: "align-items:flex-start" },
         h("div", { class: "row", style: "gap:14px;align-items:center" }, h("div", { class: "cardchip" + (c.card_type === "debito" ? " debit" : ""), "aria-hidden": "true" }, h("span", null, (c.network || "Tarjeta") + " · " + (CTYPE[c.card_type] || "Crédito")), h("b", { class: "mono" }, "•••• " + c.last4)),
           h("div", { class: "stack", style: "gap:2px" }, h("b", { style: "font-size:17px" }, c.nickname),
@@ -815,7 +829,7 @@ async function cardsView(entityId) {
             !c.entity_id ? h("span", { class: "small muted" }, "Se usa en todas las empresas") : "")),
         h("div", { class: "row only-admin" }, h("button", { class: "btn sm", type: "button", onclick: () => cardDialog(c, entityId) }, "Editar"),
           h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Eliminar tarjeta", `Se borra ${c.nickname} •••• ${c.last4} y sus estados de cuenta. Las facturas no se borran: quedan sin tarjeta asociada.`, async () => { await api("/cards/" + c.id, { method: "DELETE" }); toast("Tarjeta eliminada."); route(); }) }, "Eliminar"))),
-      info(c), cyclesView(c)))) : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay tarjetas de esta empresa. Agrega cada tarjeta con la que compras.")));
+      info(c), cyclesView(c)))))) : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay tarjetas de esta empresa. Agrega cada tarjeta con la que compras.")));
 }
 function cardDialog(c, entityId) {
   modal(c ? "Editar " + c.nickname : "Agregar tarjeta", () => {
@@ -1073,9 +1087,9 @@ async function accountantView(ent, q) {
     add("Otros movimientos", d.moves.map((x) => ({ Fecha: x.moved_on, Tipo: MOVE_KIND[x.kind], Categoría: x.category || "", Concepto: x.concept, Monto: MOVE_OUT(x.kind) ? -x.amount : x.amount, Moneda: x.currency, "Cuenta o tarjeta": x.card ? `${x.card} •••• ${x.last4}` : "", Negocio: x.business || "", Soporte: x.filename || "", Notas: x.notes || "" })));
     add("Suscripciones", d.sub_charges.map((x) => ({ Fecha: x.date, Herramienta: x.name, Plataforma: x.business, Valor: x.amount, Moneda: x.currency, Tipo: CYCLE[x.cycle], Uso: x.use_kind === "mixto" ? "Mixto (empresa y personal)" : "Empresa", Tarjeta: x.card, "En el banco": x.bank ? `Sí, ${x.bank.posted_on} por ${Math.abs(x.bank.amount)}` : d.bank.length ? "No aparece" : "Sin extracto leído", Factura: x.invoice ? [x.invoice.invoice_number, x.invoice.issue_date].filter(Boolean).join(" · ") : "Falta", Enlace: x.url || "" })));
     add("Liquidaciones Amazon", d.settlements.map((x) => ({ Negocio: x.business, Reporte: x.kind === "liquidacion" ? "Liquidación " + x.ref : x.ref, Desde: x.period_start || "", Hasta: x.period_end, Depósito: x.deposit_date || "", ...Object.fromEntries(Object.keys(SETT_LABEL).map((k) => [SETT_LABEL[k], x.breakdown[k] ? Math.round(x.breakdown[k] * 100) / 100 : 0])), Neto: x.total, Moneda: x.currency })));
-    add("Banco (conciliación)", d.bank.map((l) => ({ Fecha: l.posted_on, Cuenta: l.card ? `${l.card} •••• ${l.last4}` : "", Descripción: l.description, Monto: l.amount, Estado: BANK_ST[l.status][0], Soporte: l.match_label || "", Archivo: l.filename || "" })));
+    add("Banco (conciliación)", byBank(d.bank).flatMap(([, list]) => list).map((l) => ({ Banco: bankOf(l.issuer), Fecha: l.posted_on, Cuenta: l.card ? `${l.card} •••• ${l.last4}` : "", Descripción: l.description, Monto: l.amount, Estado: BANK_ST[l.status][0], Soporte: l.match_label || "", Archivo: l.filename || "" })));
     add("Documentos", d.docs.map((x) => ({ Carpeta: x.folder, Documento: x.title, Fecha: x.issued_on || x.created_at.slice(0, 10), Archivo: x.filename })));
-    add("Estados de cuenta", d.statements.map((x) => ({ Tarjeta: `${x.nickname} •••• ${x.last4}`, Tipo: x.card_type === "debito" ? "Débito" : "Crédito", Corte: x.closing_date, Pago: x.card_type === "debito" ? "" : x.due_date, Pagada: x.card_type === "debito" ? "" : x.paid ? "Sí" : "No", Archivo: x.filename })));
+    add("Estados de cuenta", byBank(d.statements).flatMap(([, list]) => list).map((x) => ({ Banco: bankOf(x.issuer), Tarjeta: `${x.nickname} •••• ${x.last4}`, Tipo: x.card_type === "debito" ? "Débito" : "Crédito", Corte: x.closing_date, Pago: x.card_type === "debito" ? "" : x.due_date, Pagada: x.card_type === "debito" ? "" : x.paid ? "Sí" : "No", Archivo: x.filename })));
     return XLSX.write(wb, { bookType: "xlsx", type: "array" });
   }
   const base = `${fileName(ent.name)} - ${fileName(label)}`;
@@ -1089,10 +1103,10 @@ async function accountantView(ent, q) {
     const extOf = (f) => (f && f.includes(".") ? f.slice(f.lastIndexOf(".")) : "");
     let nfiles = 0;
     for (const i of d.invoices) if (i.file_id) { zip.file(uniq(`Facturas/${fileName(i.business)}/${(i.issue_date || "sin-fecha").slice(0, 7)}/${fileName([i.issue_date, i.supplier, i.invoice_number].filter(Boolean).join(" "))}${extOf(i.filename)}`), await get(i.file_id)); nfiles++; }
-    for (const x of d.statements) { zip.file(uniq(`Estados de cuenta/${fileName(x.nickname + " " + x.last4)}/${x.closing_date}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
+    for (const x of d.statements) { zip.file(uniq(`Estados de cuenta/${fileName(bankOf(x.issuer))}/${fileName(x.nickname + " " + x.last4)}/${x.closing_date}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
     for (const x of d.moves) if (x.file_id) { zip.file(uniq(`Otros movimientos/${x.moved_on.slice(0, 7)}/${fileName(`${x.moved_on} ${MOVE_KIND[x.kind]} ${x.concept}`)}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
     const stIds = new Set(d.statements.map((x) => x.file_id));
-    for (const fid of [...new Set(d.bank.map((l) => l.file_id).filter((f) => f && !stIds.has(f)))]) { const l = d.bank.find((x) => x.file_id === fid); zip.file(uniq(`Extractos del banco/${fileName((l.card || "Cuenta") + " " + (l.last4 || ""))}/${fileName(l.filename || fid)}`), await get(fid)); nfiles++; }
+    for (const fid of [...new Set(d.bank.map((l) => l.file_id).filter((f) => f && !stIds.has(f)))]) { const l = d.bank.find((x) => x.file_id === fid); zip.file(uniq(`Estados de cuenta/${fileName(bankOf(l.issuer))}/${fileName((l.card || "Cuenta") + " " + (l.last4 || ""))}/${fileName(l.filename || fid)}`), await get(fid)); nfiles++; }
     for (const x of d.settlements) if (x.file_id) { zip.file(uniq(`Liquidaciones de Amazon/${fileName(x.kind === "liquidacion" ? `${x.period_end} liquidación ${x.ref}` : x.ref)}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
     for (const x of d.docs) { zip.file(uniq(`Documentos de la empresa/${fileName(x.folder)}/${fileName(x.title)}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
     for (const t of d.tax) for (const [fid, fn, tag] of [[t.return_file_id, t.return_filename, "declaración"], [t.payment_file_id, t.payment_filename, "pago"]]) if (fid) { zip.file(uniq(`Declaraciones/${fileName(t.obligation)}/${fileName(t.label)} - ${tag}${extOf(fn)}`), await get(fid)); nfiles++; }
@@ -1380,7 +1394,7 @@ async function bankImportDialog(ent, opts = {}) {
   let lines = [], file = null, fileId = opts.fileId || null;
   const list = h("div", { class: "stack", style: "gap:6px" });
   const info = h("p", { class: "small muted", style: "margin:0" }, "Sube el extracto o estado de cuenta: PDF descargado del banco, o mejor aún el CSV o Excel de movimientos. Se leen los movimientos y se comparan con tus facturas, suscripciones, pagos de Amazon y movimientos registrados.");
-  const cardSel = h("select", { name: "card_id", required: true }, h("option", { value: "" }, "Elige la cuenta o tarjeta"), cards.map((c) => h("option", { value: c.id, selected: opts.cardId === c.id }, cardText(c))));
+  const cardSel = h("select", { name: "card_id", required: true }, h("option", { value: "" }, "Elige la cuenta o tarjeta"), byBank(cards).map(([bank, list]) => h("optgroup", { label: bank }, list.map((c) => h("option", { value: c.id, selected: opts.cardId === c.id }, cardText(c))))));
   const isCredit = () => (cards.find((c) => c.id === cardSel.value) || {}).card_type !== "debito";
   const render = () => {
     if (!lines.length) { list.replaceChildren(); return; }
@@ -1460,12 +1474,15 @@ function bankSection(ent, d) {
   const L = d.bank; const cnt = (st) => L.filter((l) => l.status === st).length;
   const miss = L.filter((l) => l.status === "sin_soporte");
   const setSt = async (l, status, msg) => { await api("/bank/lines/" + l.id, { method: "PUT", body: { status } }); toast(msg); route(); };
-  const acct = (l) => (l.card ? `${l.card} •••• ${l.last4}` : "");
+  const acct = (l) => (l.card ? `${bankOf(l.issuer)} · ${l.card} •••• ${l.last4}` : "");
+  const banks = byBank(L);
   return h("section", { class: "card stack" },
     h("div", { class: "row between" }, h("div", null, h("h2", null, "Conciliación del banco"), h("span", { class: "small muted" }, "Cada movimiento del extracto con su soporte: factura, suscripción, pago de Amazon, declaración o movimiento registrado.")),
       h("button", { class: "btn primary sm only-upload", type: "button", onclick: () => bankImportDialog(ent) }, "Leer extracto del banco")),
     L.length ? h("div", { class: "chips" }, pill(`${L.length} movimientos`), pill(`${cnt("conciliado")} con soporte`, "ok"), cnt("sin_soporte") ? pill(`${cnt("sin_soporte")} sin soporte`, "warn") : "", cnt("personal") ? pill(`${cnt("personal")} personales`) : "", cnt("ignorado") ? pill(`${cnt("ignorado")} ignorados`) : "")
       : h("p", { class: "empty" }, "Todavía no hay extractos leídos en este período."),
+    banks.length > 1 || (banks[0] && banks[0][0] !== "Sin banco") ? h("div", { class: "grid g3" }, banks.map(([bank, list]) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, bank), h("br"),
+      h("b", null, `${list.length} movimiento${list.length === 1 ? "" : "s"}`), h("div", { class: "small", style: list.some((l) => l.status === "sin_soporte") ? "color:var(--warn)" : "color:var(--ok)" }, list.some((l) => l.status === "sin_soporte") ? `${list.filter((l) => l.status === "sin_soporte").length} sin soporte` : "Todo con soporte")))) : "",
     miss.length ? h("div", { class: "stack", style: "gap:8px" }, h("b", { class: "small" }, "Sin soporte: dime qué es cada uno"),
       h("div", { class: "stack", style: "gap:0;border-top:1px solid var(--line)" }, miss.map((l) => h("div", { class: "stack", style: "gap:6px;padding:10px 4px;border-bottom:1px solid var(--line);text-align:left;align-items:stretch" },
         h("div", { class: "row between", style: "align-items:flex-start" }, h("span", { class: "stack", style: "gap:2px" }, h("b", { style: "color:var(--ink)" }, l.description), h("span", { class: "small muted" }, [fdate(l.posted_on), acct(l)].filter(Boolean).join(" · ")), bankHint(l) ? h("span", { class: "small", style: "color:var(--warn)" }, bankHint(l)) : ""),
@@ -1477,8 +1494,8 @@ function bankSection(ent, d) {
           h("button", { class: "linkbtn small only-admin", type: "button", onclick: () => setSt(l, "personal", "Marcado como personal.") }, "Es personal"),
           h("button", { class: "linkbtn small only-admin", type: "button", onclick: () => setSt(l, "ignorado", "Ignorado.") }, "Ignorar")))))) : "",
     L.length ? h("details", null, h("summary", { class: "small", style: "cursor:pointer;font-weight:700" }, "Ver todos los movimientos del banco"),
-      h("div", { class: "tablewrap", style: "margin-top:8px" }, h("table", { style: "min-width:640px" }, h("thead", null, h("tr", null, ["Fecha", "Descripción", "Monto", "Estado", "Soporte", ""].map((c) => h("th", null, c)))),
-        h("tbody", null, L.map((l) => h("tr", null, h("td", { class: "mono" }, fdate(l.posted_on)), h("td", { class: "small" }, l.description, acct(l) ? h("div", { class: "muted" }, acct(l)) : ""),
+      h("div", { class: "tablewrap", style: "margin-top:8px" }, h("table", { style: "min-width:640px" }, h("thead", null, h("tr", null, ["Fecha", "Banco", "Descripción", "Monto", "Estado", "Soporte", ""].map((c) => h("th", null, c)))),
+        h("tbody", null, banks.flatMap(([, list]) => list).map((l) => h("tr", null, h("td", { class: "mono" }, fdate(l.posted_on)), h("td", { class: "small" }, bankOf(l.issuer)), h("td", { class: "small" }, l.description, l.card ? h("div", { class: "muted" }, `${l.card} •••• ${l.last4}`) : ""),
           h("td", { class: "mono" }, (l.amount < 0 ? "−" : "+") + money(Math.abs(l.amount))), h("td", null, pill(...BANK_ST[l.status])), h("td", { class: "small" }, l.match_label || "—"),
           h("td", { class: "only-admin" }, l.locked ? h("button", { class: "linkbtn small", type: "button", onclick: () => setSt(l, "sin_soporte", "Listo: vuelve a buscar su soporte.") }, "Deshacer") : h("button", { class: "linkbtn small", type: "button", style: "color:var(--bad)", onclick: () => confirmDelete("Quitar movimiento", "Se quita esta línea del extracto leído. El archivo del extracto no se borra.", async () => { await api("/bank/lines/" + l.id, { method: "DELETE" }); route(); }) }, "Quitar")))))))) : "");
 }
