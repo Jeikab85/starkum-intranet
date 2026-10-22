@@ -235,20 +235,21 @@ function fileActions(fileId, onSend) {
 }
 
 // ---------- subida de facturas ----------
-async function uploadInvoiceDialog(businessId, supplierId, suppliers, businesses) {
+async function uploadInvoiceDialog(businessId, supplierId, suppliers, businesses, opts = {}) {
   const chooser = !businessId && businesses?.length ? businesses : null;
   if (!businessId) businessId = chooser ? chooser[0].id : "amazon";
   const [{ cards }, lotsRes] = await Promise.all([api("/cards"), api("/lots?business=" + businessId).catch(() => ({ lots: [] }))]);
   const openLots = (lotsRes.lots || []).filter((l) => ["comprado", "etiquetado"].includes(l.stage));
-  modal("Subir factura o escaneo", () => h("div", { class: "stack" },
+  const isSub = !!opts.subId;
+  modal(isSub ? "Subir factura de " + opts.subName : opts.title || "Subir factura o escaneo", () => h("div", { class: "stack" },
     chooser ? fld("Negocio", h("select", { name: "business_id" }, chooser.map((x) => h("option", { value: x.id }, x.name)))) : "",
     fld("Archivo (foto o PDF)", h("input", { name: "file", type: "file", accept: "image/*,application/pdf", required: true })),
-    fld("Proveedor", h("select", { name: "supplier_id" }, h("option", { value: "" }, "Sin proveedor / lo elijo después"),
+    isSub ? "" : fld("Proveedor", h("select", { name: "supplier_id" }, h("option", { value: "" }, supplierId === undefined || !suppliers?.length ? "Detectarlo de la factura (se crea si no existe)" : "Sin proveedor / lo elijo después"),
       (suppliers || []).map((s) => h("option", { value: s.id, selected: s.id === supplierId }, s.name)))),
-    fld("Tipo", h("select", { name: "kind" }, ["factura", "recibo", "nota de crédito", "otro"].map((k) => h("option", { value: k }, k[0].toUpperCase() + k.slice(1))))),
-    h("div", { class: "fgrid" }, fld("Tarjeta con que pagaste", cardSelect(cards, "", "Detectarla del recibo")),
-      fld("Lote", h("select", { name: "lot_id" }, h("option", { value: "" }, "Sin lote"), h("option", { value: "__new" }, "+ Nuevo lote con esta compra"), openLots.map((l) => h("option", { value: l.id }, l.name))))),
-    h("p", { class: "small muted", style: "margin:0" }, "Las fotos se comprimen antes de subir. Después la intranet lee la factura y te muestra los datos para que los confirmes.")),
+    isSub ? h("input", { type: "hidden", name: "kind", value: "suscripción" }) : fld("Tipo", h("select", { name: "kind" }, ["factura", "recibo", "suscripción", "nota de crédito", "otro"].map((k) => h("option", { value: k }, k[0].toUpperCase() + k.slice(1))))),
+    h("div", { class: "fgrid" }, fld("Tarjeta con que pagaste", cardSelect(cards, opts.cardId || "", "Detectarla del recibo")),
+      isSub ? "" : fld("Lote", h("select", { name: "lot_id" }, h("option", { value: "" }, "Sin lote"), h("option", { value: "__new" }, "+ Nuevo lote con esta compra"), openLots.map((l) => h("option", { value: l.id }, l.name))))),
+    h("p", { class: "small muted", style: "margin:0" }, isSub ? "Se lee la factura, se crea el proveedor si no existe y, si la herramienta no tenía valor ni fecha, se completan con los de esta factura." : "Las fotos se comprimen antes de subir. Después la intranet lee la factura, crea el proveedor si no existe y te muestra los datos para que los confirmes.")),
   async (fd, form) => {
     const f = fd.get("file"); if (!f || !f.size) throw new Error("Elige un archivo.");
     form.querySelector("[type=submit]").textContent = "Comprimiendo…";
@@ -256,9 +257,10 @@ async function uploadInvoiceDialog(businessId, supplierId, suppliers, businesses
     const up = new FormData();
     up.append("file", prep.file); up.append("original_size", prep.originalSize);
     if (chooser) businessId = fd.get("business_id") || businessId;
-    up.append("business_id", businessId); up.append("supplier_id", fd.get("supplier_id")); up.append("kind", fd.get("kind"));
+    up.append("business_id", businessId); up.append("supplier_id", fd.get("supplier_id") || ""); up.append("kind", fd.get("kind"));
+    if (isSub) { up.append("sub_id", opts.subId); up.append("title", opts.subName); }
     up.append("card_id", fd.get("card_id") || "");
-    let lot = fd.get("lot_id") || "";
+    let lot = isSub ? "" : fd.get("lot_id") || "";
     if (lot === "__new") lot = (await api("/lots", { method: "POST", body: { business_id: businessId } })).id;
     up.append("lot_id", lot);
     form.querySelector("[type=submit]").textContent = "Subiendo…";
@@ -669,7 +671,9 @@ function suppliersList(b, suppliers, q, ctx = {}) {
   const qs = (o) => "?" + new URLSearchParams(Object.entries({ f, p: plat, ...o }).filter(([, v]) => v)).toString();
   return h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, ctx.title || "Proveedores de " + b.name),
       ctx.note || (fromCerebro ? h("span", { class: "small muted" }, "Estados y fichas del Cerebro Amazon, actualizado el " + fdate(fromCerebro.source_updated)) : "")),
-    h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => supplierDialog(ctx.target || { business_id: b.id }) }, "+ Agregar proveedor")),
+    h("div", { class: "row", style: "gap:8px" },
+      h("button", { class: "btn sm only-upload", type: "button", onclick: () => { const bz = ctx.target?.entity_id ? state.businesses.filter((x) => x.entity_id === ctx.target.entity_id) : null; if (bz && !bz.length) return toast("Primero agrega un negocio a esta empresa: cada factura se archiva en un negocio.", true); uploadInvoiceDialog(bz ? null : b.id, undefined, [], bz && bz.length ? bz : null, { title: "Agregar proveedor desde una factura" }); } }, "Desde una factura"),
+      h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => supplierDialog(ctx.target || { business_id: b.id }) }, "+ Agregar proveedor"))),
     ctx.platforms ? h("div", { class: "chips" }, h("span", { class: "small muted", style: "align-self:center" }, "Plataforma:"), ["", ...ctx.platforms].map((pl) => h("a", { class: "chip" + (pl === plat ? " on" : ""), href: `${base}/proveedores` + qs({ p: pl }) }, pl || "Todas"))) : "",
     h("div", { class: "chips", role: "tablist" }, filters.map(([k, l, fn]) => h("a", { class: "chip" + (k === cur[0] ? " on" : ""), href: `${base}/proveedores` + qs({ f: k }), role: "tab", "aria-selected": String(k === cur[0]) }, `${l} (${suppliers.filter(fn).length})`))),
     search, list.length ? grid : h("p", { class: "empty" }, "No hay proveedores en este filtro."));
@@ -1025,7 +1029,7 @@ async function accountantView(ent, q) {
     kind === "mes" ? h("select", { "aria-label": "Mes", style: "width:auto", onchange: (e) => { location.hash = nav({ n: e.target.value }); } }, MONTHS.map((l, i) => h("option", { value: i + 1, selected: i + 1 === n }, l))) : "",
     kind === "trimestre" ? h("select", { "aria-label": "Trimestre", style: "width:auto", onchange: (e) => { location.hash = nav({ n: e.target.value }); } }, [1, 2, 3, 4].map((t) => h("option", { value: t, selected: t === n }, `${t}.º trimestre`))) : "",
     h("select", { "aria-label": "Año", style: "width:auto", onchange: (e) => { location.hash = nav({ anio: e.target.value }); } }, [now.getFullYear() + 1, now.getFullYear(), now.getFullYear() - 1, now.getFullYear() - 2].map((y) => h("option", { value: y, selected: y === year }, y))));
-  const inv = d.invoices.filter((i) => i.kind !== "nota de crédito"), credits = d.invoices.filter((i) => i.kind === "nota de crédito");
+  const inv = d.invoices.filter((i) => i.kind !== "nota de crédito" && i.kind !== "suscripción"), credits = d.invoices.filter((i) => i.kind === "nota de crédito"), subInv = d.invoices.filter((i) => i.kind === "suscripción");
   const movIn = d.moves.filter((x) => x.kind === "ingreso"), movOut = d.moves.filter((x) => x.kind === "gasto"), movTr = d.moves.filter((x) => x.kind === "transferencia");
   const movRet = d.moves.filter((x) => x.kind === "retiro"), movAp = d.moves.filter((x) => x.kind === "aporte");
   const subTot = d.sub_charges.filter((x) => x.currency === (ent.id === "sas" ? "COP" : "USD")).reduce((a, x) => a + x.amount, 0);
@@ -1049,7 +1053,7 @@ async function accountantView(ent, q) {
       { Concepto: "Envíos cobrados", Valor: sum(inv, "shipping") }, { Concepto: "Descuentos", Valor: sum(inv, "discount") }, { Concepto: "Total compras", Valor: sum(inv, "total") },
       { Concepto: "Notas de crédito", Valor: sum(credits, "total") }, { Concepto: "Pagos recibidos de Amazon (depósitos)", Valor: sum(d.payouts, "amount") },
       ...Object.keys(SETT_LABEL).filter((k) => sett[k]).map((k) => ({ Concepto: "Amazon · " + SETT_LABEL[k], Valor: Math.round(sett[k] * 100) / 100 })),
-      { Concepto: "Suscripciones cobradas", Valor: subTot },
+      { Concepto: "Suscripciones cobradas", Valor: subTot }, { Concepto: "Facturas de suscripciones (soporte)", Valor: subInv.length },
       { Concepto: "Otros ingresos", Valor: sum(movIn, "amount") }, { Concepto: "Otros gastos", Valor: sum(movOut, "amount") },
       { Concepto: "Retiros del dueño", Valor: sum(movRet, "amount") }, { Concepto: "Aportes del dueño", Valor: sum(movAp, "amount") }, { Concepto: "Transferencias entre cuentas propias", Valor: sum(movTr, "amount") },
       { Concepto: "Movimientos del banco leídos", Valor: d.bank.length }, { Concepto: "Movimientos del banco sin soporte", Valor: bankMiss },
@@ -1064,7 +1068,7 @@ async function accountantView(ent, q) {
     add("Pagos de Amazon", d.payouts.map((x) => ({ Fecha: x.paid_on, Negocio: x.business, Monto: x.amount, Lote: x.lot || "", Notas: x.notes || "" })));
     add("Declaraciones", d.tax.map((t) => ({ Obligación: t.obligation, Período: t.label, Desde: t.period_start, Hasta: t.period_end, Vence: t.due_date, Estado: t.status, Monto: t.amount ?? "", Presentada: t.filed_on || "", Notas: t.notes || "" })));
     add("Otros movimientos", d.moves.map((x) => ({ Fecha: x.moved_on, Tipo: MOVE_KIND[x.kind], Categoría: x.category || "", Concepto: x.concept, Monto: MOVE_OUT(x.kind) ? -x.amount : x.amount, Moneda: x.currency, "Cuenta o tarjeta": x.card ? `${x.card} •••• ${x.last4}` : "", Negocio: x.business || "", Soporte: x.filename || "", Notas: x.notes || "" })));
-    add("Suscripciones", d.sub_charges.map((x) => ({ Fecha: x.date, Herramienta: x.name, Plataforma: x.business, Valor: x.amount, Moneda: x.currency, Tipo: CYCLE[x.cycle], Uso: x.use_kind === "mixto" ? "Mixto (empresa y personal)" : "Empresa", Tarjeta: x.card, "En el banco": x.bank ? `Sí, ${x.bank.posted_on} por ${Math.abs(x.bank.amount)}` : d.bank.length ? "No aparece" : "Sin extracto leído", Enlace: x.url || "" })));
+    add("Suscripciones", d.sub_charges.map((x) => ({ Fecha: x.date, Herramienta: x.name, Plataforma: x.business, Valor: x.amount, Moneda: x.currency, Tipo: CYCLE[x.cycle], Uso: x.use_kind === "mixto" ? "Mixto (empresa y personal)" : "Empresa", Tarjeta: x.card, "En el banco": x.bank ? `Sí, ${x.bank.posted_on} por ${Math.abs(x.bank.amount)}` : d.bank.length ? "No aparece" : "Sin extracto leído", Factura: x.invoice ? [x.invoice.invoice_number, x.invoice.issue_date].filter(Boolean).join(" · ") : "Falta", Enlace: x.url || "" })));
     add("Liquidaciones Amazon", d.settlements.map((x) => ({ Negocio: x.business, Reporte: x.kind === "liquidacion" ? "Liquidación " + x.ref : x.ref, Desde: x.period_start || "", Hasta: x.period_end, Depósito: x.deposit_date || "", ...Object.fromEntries(Object.keys(SETT_LABEL).map((k) => [SETT_LABEL[k], x.breakdown[k] ? Math.round(x.breakdown[k] * 100) / 100 : 0])), Neto: x.total, Moneda: x.currency })));
     add("Banco (conciliación)", d.bank.map((l) => ({ Fecha: l.posted_on, Cuenta: l.card ? `${l.card} •••• ${l.last4}` : "", Descripción: l.description, Monto: l.amount, Estado: BANK_ST[l.status][0], Soporte: l.match_label || "", Archivo: l.filename || "" })));
     add("Documentos", d.docs.map((x) => ({ Carpeta: x.folder, Documento: x.title, Fecha: x.issued_on || x.created_at.slice(0, 10), Archivo: x.filename })));
@@ -1101,9 +1105,10 @@ async function accountantView(ent, q) {
     settlementSection(ent, d),
     bankSection(ent, d),
     d.sub_charges.length ? h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, "Suscripciones cobradas en el período"), h("span", { class: "small muted" }, "Cada cobro esperado y si ya aparece en el extracto del banco.")), h("a", { href: `#/empresa/${ent.id}/suscripciones`, style: "font-weight:700" }, "Administrar →")),
-      h("div", { class: "tablewrap" }, h("table", { style: "min-width:560px" }, h("thead", null, h("tr", null, ["Fecha", "Herramienta", "Plataforma", "Valor", "En el banco"].map((c) => h("th", null, c)))),
+      h("div", { class: "tablewrap" }, h("table", { style: "min-width:560px" }, h("thead", null, h("tr", null, ["Fecha", "Herramienta", "Plataforma", "Valor", "En el banco", "Factura"].map((c) => h("th", null, c)))),
         h("tbody", null, d.sub_charges.map((x) => h("tr", null, h("td", { class: "mono" }, fdate(x.date)), h("td", null, x.name), h("td", { class: "small" }, x.business), h("td", { class: "mono" }, money(x.amount, x.currency)),
-          h("td", null, x.bank ? pill(`Sí · ${fdate(x.bank.posted_on)}${Math.abs(Math.abs(x.bank.amount) - x.amount) > 0.01 ? " · " + money(Math.abs(x.bank.amount)) : ""}`, "ok") : x.date > new Date().toISOString().slice(0, 10) ? pill("Próximo") : d.bank.length ? pill("No aparece", "warn") : h("span", { class: "small muted" }, "Sin extracto leído")))))))) : "",
+          h("td", null, x.bank ? pill(`Sí · ${fdate(x.bank.posted_on)}${Math.abs(Math.abs(x.bank.amount) - x.amount) > 0.01 ? " · " + money(Math.abs(x.bank.amount)) : ""}`, "ok") : x.date > new Date().toISOString().slice(0, 10) ? pill("Próximo") : d.bank.length ? pill("No aparece", "warn") : h("span", { class: "small muted" }, "Sin extracto leído")),
+          h("td", null, x.invoice ? h("a", { href: "#/factura/" + x.invoice.id }, "Ver") : h("span", { class: "small muted" }, "Falta")))))))) : "",
     h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, "Otros movimientos"), h("span", { class: "small muted" }, "Lo que no es una factura ni una suscripción: comisiones del banco, depósitos, retiros o aportes del dueño…")),
         h("button", { class: "btn primary sm only-upload", type: "button", onclick: () => moveDialog(ent) }, "+ Agregar movimiento")),
       d.moves.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:620px" }, h("thead", null, h("tr", null, ["Fecha", "Tipo", "Concepto", "Monto", "Cuenta", "Soporte", ""].map((c) => h("th", null, c)))),
@@ -1185,6 +1190,10 @@ async function subsView(ent, biz, q) {
     h("td", { class: "mono" }, s.cycle === "gratis" ? pill("Gratis", "ok") : s.amount > 0 ? money(s.amount, s.currency) : "—"), h("td", null, s.pending || s.cycle === "gratis" ? "—" : CYCLE[s.cycle]),
     h("td", { class: "mono" }, !s.active ? h("span", { class: "small muted" }, "Cancelada " + fdate(s.ended_on)) : s.pending ? pill("Por completar", "warn") : s.cycle === "gratis" ? "—" : fdate(s.next_charge)),
     h("td", { class: "small" }, s.card ? `${s.card} •••• ${s.last4}` : "—"),
+    h("td", { class: "small" }, h("span", { class: "stack", style: "gap:2px" },
+      s.invoices.length ? h("a", { href: "#/factura/" + s.invoices[0].id, style: "font-weight:700" }, `${s.invoices.length} factura${s.invoices.length === 1 ? "" : "s"}`) : h("span", { class: "muted" }, "Sin facturas"),
+      s.invoices.length ? h("span", { class: "muted" }, `Última: ${fdate(s.invoices[0].issue_date || s.invoices[0].created_at)}${s.invoices[0].total ? " · " + money(s.invoices[0].total, s.invoices[0].currency) : ""}`) : "",
+      s.cycle !== "gratis" ? h("button", { class: "linkbtn small only-upload", type: "button", style: "padding:0;text-align:left", onclick: () => subInvoice(s, ent, platforms) }, "+ Subir factura") : "")),
     h("td", { class: "only-admin" }, h("button", { class: "linkbtn small", type: "button", onclick: () => subDialog(s, ent, cards, platforms) }, s.pending ? "Completar" : "Editar")));
   return h("div", { class: "stack", style: "gap:16px" },
     h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, biz ? `Las herramientas que usas en ${biz.name}. Si una también la usas en otra plataforma, es el mismo registro: se cobra una sola vez.` : "Cada herramienta es un solo registro aunque la uses en varias plataformas, así el cobro no se duplica. Cada cobro sale en el paquete del contador y se compara con el estado de cuenta."),
@@ -1192,7 +1201,7 @@ async function subsView(ent, biz, q) {
     filt,
     h("div", { class: "grid g4" }, stat("Con cobro activo", act.length), ...curs.flatMap((c) => [stat("Al mes" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.m || 0, c)), stat("Al año" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.y || 0, c))]), stat("Por completar", pend)),
     shown.length ? h("section", { class: "card stack" },
-      h("div", { class: "tablewrap" }, h("table", { style: "min-width:720px" }, h("thead", null, h("tr", null, ["Herramienta", "Plataformas", "Valor", "Tipo", "Próximo cobro", "Tarjeta", ""].map((c) => h("th", null, c)))), h("tbody", null, shown.map(row)))),
+      h("div", { class: "tablewrap" }, h("table", { style: "min-width:860px" }, h("thead", null, h("tr", null, ["Herramienta", "Plataformas", "Valor", "Tipo", "Próximo cobro", "Tarjeta", "Facturas", ""].map((c) => h("th", null, c)))), h("tbody", null, shown.map(row)))),
       pend ? h("p", { class: "small muted", style: "margin:0" }, "Las que dicen \"Por completar\" todavía no cuentan como gasto. Cuando empieces a pagarlas, agrega el valor, el tipo, la fecha de cobro y la tarjeta.") : "")
       : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay herramientas aquí.")),
     h("section", { class: "card stack" }, h("h2", null, "¿Cuentan como gasto de la empresa?"),
@@ -1200,6 +1209,13 @@ async function subsView(ent, biz, q) {
         ? "Sí, si la herramienta se usa para el negocio. En Colombia el gasto necesita soporte: la factura electrónica del proveedor o, si es del exterior, el documento soporte. Guarda la factura de cada cobro y confirma con el contador el IVA y la retención de servicios del exterior."
         : "Sí, si la herramienta se usa para el negocio: en la LLC (Schedule C) son gastos deducibles y bajan la utilidad sobre la que pagas impuestos. Si también la usas para algo personal, solo cuenta la parte del negocio: márcala como \"Mixto\" y el contador decide el porcentaje."),
       h("p", { class: "small muted", style: "margin:0" }, "No soy contador: el contador confirma cómo se clasifica cada una.")));
+}
+function subInvoice(s, ent, platforms) {
+  const bizIds = s.platform_ids.map((pid) => (platforms.find((p) => p.id === pid) || {}).business_id).filter(Boolean);
+  const own = state.businesses.filter((b) => b.entity_id === ent.id);
+  const bid = bizIds.find((id) => own.some((b) => b.id === id)) || own[0]?.id;
+  if (!bid) return toast("Primero agrega un negocio a esta empresa: cada factura se archiva en un negocio.", true);
+  uploadInvoiceDialog(bid, undefined, [], null, { subId: s.id, subName: s.name, cardId: s.card_id });
 }
 function subDialog(s, ent, cards, platforms, platDefault) {
   const sel = new Set(s ? s.platform_ids : platDefault ? [platDefault] : []);
@@ -1769,7 +1785,7 @@ async function pageInvoice(id, q) {
       body.confidence = inv.confidence; body.confirm = confirm;
       const r = await api("/invoices/" + id, { method: "PUT", body });
       drawChecks(r.checks); sessionStorage.removeItem("read:" + id);
-      toast(!confirm ? "Cambios guardados." : r.supplier_created ? "Factura archivada. Creé el proveedor con los datos de la factura." : "Factura confirmada y archivada.");
+      toast(!confirm ? "Cambios guardados." : (r.supplier_created ? "Factura archivada. Creé el proveedor con los datos de la factura." : "Factura confirmada y archivada.") + (r.sub_filled ? " La suscripción tomó el valor y la fecha de esta factura." : ""));
       const sid = r.supplier_id || supSel.value;
       if (confirm) location.hash = sid ? `#/negocio/${b.id}/proveedor/${sid}?` + new URLSearchParams(dateParts(F.issue_date.value)) : `#/negocio/${b.id}/archivo?` + new URLSearchParams(dateParts(F.issue_date.value));
     });

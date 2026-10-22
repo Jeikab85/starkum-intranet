@@ -22,6 +22,7 @@ const MIGRATIONS = [
   "UPDATE money_moves SET kind = 'retiro' WHERE kind = 'transferencia' AND category = 'Retiro del dueño'",
   "UPDATE money_moves SET kind = 'aporte' WHERE kind = 'transferencia' AND category = 'Aporte del dueño'",
   "ALTER TABLE subscriptions ADD COLUMN platform_ids TEXT NOT NULL DEFAULT '[]'",
+  "ALTER TABLE invoices ADD COLUMN sub_id TEXT",
   "UPDATE subscriptions SET platform_ids = COALESCE((SELECT json_group_array(p.id) FROM platforms p WHERE p.business_id = subscriptions.business_id), '[]') WHERE business_id IS NOT NULL AND platform_ids = '[]'",
 ];
 const MOVE_KINDS = ["ingreso", "gasto", "retiro", "aporte", "transferencia"];
@@ -379,6 +380,7 @@ async function invoiceChecks(env, inv) {
       .bind(inv.invoice_number, inv.supplier_id || null, inv.id || "").first();
     checks.push(dup ? { level: "mal", text: `Posible duplicada: ya existe la factura ${inv.invoice_number} de este proveedor.`, link: dup.id } : { level: "bien", text: `No es duplicada: no hay otra ${inv.invoice_number} de este proveedor.` });
   } else checks.push({ level: "atencion", text: "Falta el número de factura." });
+  if (inv.kind === "suscripción") { checks.push({ level: "bien", text: "Factura de suscripción: es soporte del gasto para el contador. No aplica lo que pide Amazon para facturas de compra." }); return checks; }
   if (num(inv.tax) > 0) checks.push({ level: "atencion", text: `Te cobraron impuesto de venta (${Number(inv.tax).toFixed(2)}). Con tu certificado de reventa podrías reclamarlo.` });
   if (inv.kind === "recibo") checks.push({ level: "atencion", text: "Amazon no acepta recibos de tienda como prueba de compra: guárdalo para tus cuentas, pero para Amazon necesitas una factura del proveedor." });
   const missing = [];
@@ -1072,7 +1074,7 @@ async function api(req, env, url, user) {
   // Inventario por producto (unidades compradas según facturas y etapa del lote)
   if (p === "/inventory" && m === "GET") {
     const biz = url.searchParams.get("business") || "amazon";
-    const rows = (await env.DB.prepare("SELECT i.id, i.items, i.issue_date, i.currency, COALESCE(s.name, i.supplier_name) AS supplier, l.stage, l.name AS lot FROM invoices i LEFT JOIN suppliers s ON s.id = i.supplier_id LEFT JOIN lots l ON l.id = i.lot_id WHERE i.business_id = ? AND i.kind != 'nota de crédito'").bind(biz).all()).results;
+    const rows = (await env.DB.prepare("SELECT i.id, i.items, i.issue_date, i.currency, COALESCE(s.name, i.supplier_name) AS supplier, l.stage, l.name AS lot FROM invoices i LEFT JOIN suppliers s ON s.id = i.supplier_id LEFT JOIN lots l ON l.id = i.lot_id WHERE i.business_id = ? AND i.kind NOT IN ('nota de crédito', 'suscripción')").bind(biz).all()).results;
     const map = new Map();
     const where = (st) => !st || st === "comprado" || st === "etiquetado" ? "casa" : st === "enviado" || st === "recibido" ? "camino" : st === "vendiendo" ? "vendiendo" : "recuperado";
     for (const r of rows) for (const it of JSON.parse(r.items || "[]")) {
@@ -1124,7 +1126,8 @@ async function api(req, env, url, user) {
     const rows = (await env.DB.prepare(`SELECT s.*, c.nickname AS card, c.last4, c.card_type FROM subscriptions s LEFT JOIN cards c ON c.id = s.card_id WHERE ${biz ? "(EXISTS (SELECT 1 FROM json_each(s.platform_ids) j JOIN platforms p ON p.id = j.value WHERE p.business_id = ?) OR (s.entity_id = ? AND s.platform_ids = '[]'))" : "s.entity_id = ?"} ORDER BY s.ended_on IS NOT NULL, s.name`).bind(...(biz ? [biz, bizEnt] : [ent])).all()).results;
     const names = await platNames(env);
     const today = new Date().toISOString().slice(0, 10);
-    return json({ subs: rows.map((s) => subOut(s, names, today)) });
+    const invs = rows.length ? (await env.DB.prepare(`SELECT id, sub_id, issue_date, total, currency, invoice_number, status, created_at FROM invoices WHERE sub_id IN (${rows.map(() => "?").join(",")}) ORDER BY COALESCE(issue_date, created_at) DESC`).bind(...rows.map((r) => r.id)).all()).results : [];
+    return json({ subs: rows.map((s) => ({ ...subOut(s, names, today), invoices: invs.filter((i) => i.sub_id === s.id) })) });
   }
   if ((p === "/subs" && m === "POST") || ((mm = p.match(/^\/subs\/([\w-]+)$/)) && m === "PUT")) {
     const b = await body();
@@ -1244,7 +1247,7 @@ async function api(req, env, url, user) {
     if (!ent || !from || !to) return fail("Elige la empresa y el período.");
     const [entity, invs, pays, tax, docs, moves, cdocs] = await Promise.all([
       env.DB.prepare("SELECT * FROM entities WHERE id = ?").bind(ent).first(),
-      env.DB.prepare(`SELECT i.id, i.kind, i.invoice_number, i.po_number, i.issue_date, i.due_date, i.currency, i.subtotal, i.tax, i.shipping, i.discount, i.total, i.payment_status, i.payment_method, i.status, i.items, i.card_last4,
+      env.DB.prepare(`SELECT i.id, i.kind, i.sub_id, i.invoice_number, i.po_number, i.issue_date, i.due_date, i.currency, i.subtotal, i.tax, i.shipping, i.discount, i.total, i.payment_status, i.payment_method, i.status, i.items, i.card_last4,
           COALESCE(s.name, i.supplier_name) AS supplier, s.tax_id AS supplier_tax_id, b.name AS business, c.nickname AS card, c.card_type, c.network, c.last4, c.issuer, l.name AS lot, f.id AS file_id, f.filename, f.size
         FROM invoices i JOIN businesses b ON b.id = i.business_id LEFT JOIN suppliers s ON s.id = i.supplier_id LEFT JOIN cards c ON c.id = i.card_id LEFT JOIN lots l ON l.id = i.lot_id LEFT JOIN files f ON f.id = i.file_id
         WHERE b.entity_id = ? AND COALESCE(i.issue_date, substr(i.created_at,1,10)) BETWEEN ? AND ? ORDER BY COALESCE(i.issue_date, i.created_at)`).bind(ent, from, to).all(),
@@ -1263,7 +1266,8 @@ async function api(req, env, url, user) {
     ]);
     const matched = new Map(bank.results.filter((l) => l.match_kind === "suscripcion").map((l) => [l.match_id, l]));
     const bn = await platNames(env);
-    const subCh = subs.results.flatMap((s) => subCharges(s, from, to).map((d) => ({ sub_id: s.id, date: d, name: s.name, business: subOut(s, bn, from).platforms_label, amount: s.amount, currency: s.currency, cycle: s.cycle, use_kind: s.use_kind, card: s.card ? `${s.card} •••• ${s.last4}` : "", url: s.url, bank: matched.get(s.id + "@" + d) || null }))).sort((a, z) => a.date.localeCompare(z.date));
+    const subCh = subs.results.flatMap((s) => subCharges(s, from, to).map((d) => ({ sub_id: s.id, date: d, name: s.name, business: subOut(s, bn, from).platforms_label, amount: s.amount, currency: s.currency, cycle: s.cycle, use_kind: s.use_kind, card: s.card ? `${s.card} •••• ${s.last4}` : "", url: s.url, bank: matched.get(s.id + "@" + d) || null,
+      invoice: (invs.results.filter((i) => i.sub_id === s.id && i.issue_date && dayDiff(i.issue_date, d) <= (s.cycle === "anual" ? 45 : 20)).sort((a, z) => dayDiff(a.issue_date, d) - dayDiff(z.issue_date, d))[0]) || null }))).sort((a, z) => a.date.localeCompare(z.date));
     return json({ entity: { id: entity.id, name: entity.name }, from, to, invoices: invs.results.map((i) => ({ ...i, items: JSON.parse(i.items || "[]") })), payouts: pays.results, tax: tax.results, statements: docs.results, moves: moves.results, docs: cdocs.results,
       sub_charges: subCh, bank: bank.results, settlements: setts.results.map((x) => ({ ...x, breakdown: JSON.parse(x.breakdown || "{}") })) });
   }
@@ -1465,8 +1469,8 @@ async function api(req, env, url, user) {
     if (!(await env.DB.prepare("SELECT id FROM businesses WHERE id = ?").bind(business).first())) return fail("Negocio no válido.");
     const fileId = await storeFile(env, user, fd.get("file"), fd.get("original_size"));
     const id = uid();
-    await env.DB.prepare("INSERT INTO invoices (id, business_id, supplier_id, file_id, kind, title, issue_date, status, card_id, lot_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-      .bind(id, business, fd.get("supplier_id") || null, fileId, fd.get("kind") || "factura", fd.get("title") || null, isoDate(fd.get("issue_date")), "por_revisar", fd.get("card_id") || null, fd.get("lot_id") || null, now()).run();
+    await env.DB.prepare("INSERT INTO invoices (id, business_id, supplier_id, file_id, kind, title, issue_date, status, card_id, lot_id, sub_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(id, business, fd.get("supplier_id") || null, fileId, fd.get("kind") || "factura", fd.get("title") || null, isoDate(fd.get("issue_date")), "por_revisar", fd.get("card_id") || null, fd.get("lot_id") || null, fd.get("sub_id") || null, now()).run();
     return json({ id, file_id: fileId });
   }
   if ((mm = p.match(/^\/invoices\/([\w-]+)$/)) && m === "GET") {
@@ -1522,7 +1526,15 @@ async function api(req, env, url, user) {
       await env.DB.prepare("UPDATE suppliers SET email = COALESCE(NULLIF(email,''), ?), phone = COALESCE(NULLIF(phone,''), ?), website = COALESCE(NULLIF(website,''), ?), address = COALESCE(NULLIF(address,''), ?), tax_id = COALESCE(NULLIF(tax_id,''), ?) WHERE id = ?")
         .bind(inv.supplier_email, inv.supplier_phone, inv.supplier_website, inv.supplier_address, inv.supplier_tax_id, inv.supplier_id).run();
     }
-    return json({ ok: true, checks: await invoiceChecks(env, inv), supplier_id: inv.supplier_id, supplier_created: supplierCreated });
+    let subFilled = false;
+    if (b.confirm && inv.sub_id && num(inv.total) > 0) {
+      const sub = await env.DB.prepare("SELECT * FROM subscriptions WHERE id = ?").bind(inv.sub_id).first();
+      if (sub && sub.cycle !== "gratis" && (!(sub.amount > 0) || !sub.charge_date)) {
+        await env.DB.prepare("UPDATE subscriptions SET amount = ?, currency = ?, charge_date = COALESCE(NULLIF(charge_date,''), ?), card_id = COALESCE(card_id, ?) WHERE id = ?").bind(num(inv.total), inv.currency || "USD", inv.issue_date || "", inv.card_id || null, sub.id).run();
+        subFilled = true;
+      }
+    }
+    return json({ ok: true, checks: await invoiceChecks(env, inv), supplier_id: inv.supplier_id, supplier_created: supplierCreated, sub_filled: subFilled });
   }
 
   // Eliminar (solo administrador)
