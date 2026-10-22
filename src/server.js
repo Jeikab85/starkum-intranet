@@ -17,6 +17,7 @@ const MIGRATIONS = [
   "ALTER TABLE suppliers ADD COLUMN address TEXT", "ALTER TABLE suppliers ADD COLUMN tax_id TEXT",
   ...["status", "status_by", "amazon_policy", "amazon_note", "location", "risk", "risk_note", "priority", "decision", "director_note", "draft_text", "draft_condition", "draft_channel", "source", "source_updated"].map((c) => `ALTER TABLE suppliers ADD COLUMN ${c} TEXT`),
   "ALTER TABLE suppliers ADD COLUMN contact_order INTEGER",
+  "ALTER TABLE cards ADD COLUMN card_type TEXT NOT NULL DEFAULT 'credito'",
   "ALTER TABLE invoices ADD COLUMN card_id TEXT", "ALTER TABLE invoices ADD COLUMN card_last4 TEXT", "ALTER TABLE invoices ADD COLUMN lot_id TEXT",
 ];
 const LOGO_URL = "https://starkumholdings.com/wp-content/uploads/2026/08/starkum-holdings-logo.png";
@@ -472,33 +473,36 @@ async function importCerebro(env, b, biz) {
 // ---------- tarjetas y lotes ----------
 const NETWORKS = ["Visa", "Mastercard", "American Express", "Discover", "Otra"];
 const LOT_STAGES = ["comprado", "etiquetado", "enviado", "recibido", "vendiendo", "recuperado"];
-function cardLabel(c) { return `${c.network || "Tarjeta"} terminada en ${c.last4}${c.issuer ? " (" + c.issuer + ")" : ""}${c.holder ? ", titular " + c.holder : ""}`; }
+function cardLabel(c) { return `${c.network || "Tarjeta"} ${c.card_type === "debito" ? "débito" : "crédito"} terminada en ${c.last4}${c.issuer ? " (" + c.issuer + ")" : ""}${c.holder ? ", titular " + c.holder : ""}`; }
 function clampDay(y, m, d) { return ymd(y, m, Math.min(d, new Date(Date.UTC(y, m + 1, 0)).getUTCDate())); }
 // Crea los ciclos (cierre → pago) del mes anterior, el actual y el siguiente de cada tarjeta
 async function ensureCycles(env) {
-  const cards = (await env.DB.prepare("SELECT id, closing_day, due_day, created_at FROM cards WHERE active = 1 AND closing_day IS NOT NULL AND due_day IS NOT NULL").all()).results;
+  const cards = (await env.DB.prepare("SELECT id, card_type, closing_day, due_day, created_at FROM cards WHERE active = 1 AND ((closing_day IS NOT NULL AND due_day IS NOT NULL) OR card_type = 'debito')").all()).results;
   if (!cards.length) return;
   const t = new Date(); const stmts = [];
-  for (const c of cards) for (const k of [-1, 0, 1]) {
+  for (const c of cards) for (const k of [-3, -2, -1, 0, 1]) {
     const y = t.getUTCFullYear(), m = t.getUTCMonth() + k;
-    const close = clampDay(y, m, c.closing_day);
-    const due = c.due_day > c.closing_day ? clampDay(y, m, c.due_day) : clampDay(y, m + 1, c.due_day);
-    if (due < c.created_at.slice(0, 10)) continue; // ciclos que ya estaban pagados antes de registrar la tarjeta
-    stmts.push(env.DB.prepare("INSERT OR IGNORE INTO card_cycles (id, card_id, closing_date, due_date, created_at) VALUES (?,?,?,?,?)").bind(uid(), c.id, close, due, now()));
+    const debit = c.card_type === "debito";
+    const close = clampDay(y, m, debit ? c.closing_day || 31 : c.closing_day);
+    const due = debit ? close : c.due_day > c.closing_day ? clampDay(y, m, c.due_day) : clampDay(y, m + 1, c.due_day);
+    // Los ciclos anteriores al registro de la tarjeta se dan por pagados (sirven solo para subir extractos viejos)
+    const before = due < c.created_at.slice(0, 10) ? 1 : 0;
+    stmts.push(env.DB.prepare("INSERT OR IGNORE INTO card_cycles (id, card_id, closing_date, due_date, paid, created_at) VALUES (?,?,?,?,?,?)").bind(uid(), c.id, close, due, before, now()));
   }
   if (stmts.length) await env.DB.batch(stmts);
 }
-const CARD_PROMPT = `Lee la foto del frente de una tarjeta de crédito o débito y responde SOLO con JSON válido: {"issuer":"","network":"Visa|Mastercard|American Express|Discover|Otra","holder":"","last4":"","exp_month":0,"exp_year":0}.
+const CARD_PROMPT = `Lee la foto del frente de una tarjeta de crédito o débito y responde SOLO con JSON válido: {"issuer":"","network":"Visa|Mastercard|American Express|Discover|Otra","card_type":"credito|debito","holder":"","last4":"","exp_month":0,"exp_year":0}.
+"card_type" es "debito" si la tarjeta dice DEBIT o DÉBITO; si no, "credito".
 "issuer" es el banco o emisor (por ejemplo Chase, Capital One, Discover). "holder" es el nombre impreso. "last4" son SOLO los últimos 4 dígitos del número. Nunca escribas el número completo ni el código de seguridad. exp_year con 4 dígitos. Usa "" o 0 si no se ve.`;
 async function readCard(env, image) {
-  if (!env.AI && env.DEV === "1") return { issuer: "Chase", network: "Visa", holder: "JONTH CABALLERO", last4: "1002", exp_month: 8, exp_year: 2029 };
+  if (!env.AI && env.DEV === "1") return { card_type: "credito", issuer: "Chase", network: "Visa", holder: "JONTH CABALLERO", last4: "1002", exp_month: 8, exp_year: 2029 };
   if (!env.AI) throw new Error("La lectura automática no está activada.");
   const out = await env.AI.run(env.AI_MODEL || "@cf/meta/llama-4-scout-17b-16e-instruct", { messages: [{ role: "user", content: [{ type: "text", text: CARD_PROMPT }, { type: "image_url", image_url: { url: image } }] }], max_tokens: 300, temperature: 0 });
   const x = parseModelJson(out?.response ?? out?.result?.response ?? out) || {};
   const safe = (v) => String(v || "").replace(/\d[\d\s-]{7,}\d/g, "").trim().slice(0, 60);
   const net = NETWORKS.find((n) => n.toLowerCase() === String(x.network || "").toLowerCase()) || (/amex|american/i.test(x.network) ? "American Express" : /master/i.test(x.network) ? "Mastercard" : /visa/i.test(x.network) ? "Visa" : /discover/i.test(x.network) ? "Discover" : "");
   const em = Number(x.exp_month) || 0, ey = Number(x.exp_year) || 0;
-  return { issuer: safe(x.issuer), network: net, holder: safe(x.holder), last4: (String(x.last4 || "").replace(/\D/g, "").match(/(\d{4})$/) || [])[1] || "", exp_month: em >= 1 && em <= 12 ? em : null, exp_year: ey > 2000 && ey < 2100 ? ey : ey > 20 && ey < 100 ? 2000 + ey : null };
+  return { card_type: /deb/i.test(x.card_type || "") ? "debito" : "credito", issuer: safe(x.issuer), network: net, holder: safe(x.holder), last4: (String(x.last4 || "").replace(/\D/g, "").match(/(\d{4})$/) || [])[1] || "", exp_month: em >= 1 && em <= 12 ? em : null, exp_year: ey > 2000 && ey < 2100 ? ey : ey > 20 && ey < 100 ? 2000 + ey : null };
 }
 
 // ---------- estado de documentos ----------
@@ -546,7 +550,7 @@ async function api(req, env, url, user) {
     const taxDue = (await env.DB.prepare("SELECT tp.label, tp.due_date, tp.status, o.name, o.entity_id FROM tax_periods tp JOIN tax_obligations o ON o.id = tp.obligation_id WHERE o.active = 1 AND tp.status = 'pendiente' AND tp.due_date <= ? ORDER BY tp.due_date LIMIT 8").bind(new Date(Date.now() + 90 * 864e5).toISOString().slice(0, 10)).all()).results
       .map((t) => ({ title: `${t.name} · ${t.label}`, entity_id: t.entity_id, due_on: t.due_date, kind: "impuesto", overdue: t.due_date < new Date().toISOString().slice(0, 10) }));
     await ensureCycles(env);
-    const cardDue = (await env.DB.prepare("SELECT cc.due_date, c.nickname, c.last4 FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.active = 1 AND cc.paid = 0 AND cc.due_date <= ? AND cc.closing_date <= ? ORDER BY cc.due_date LIMIT 6").bind(new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10), new Date().toISOString().slice(0, 10)).all()).results
+    const cardDue = (await env.DB.prepare("SELECT cc.due_date, c.nickname, c.last4 FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.active = 1 AND c.card_type != 'debito' AND cc.paid = 0 AND cc.due_date <= ? AND cc.closing_date <= ? ORDER BY cc.due_date LIMIT 6").bind(new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10), new Date().toISOString().slice(0, 10)).all()).results
       .map((c) => ({ title: `Pagar el total de la tarjeta ${c.nickname} •••• ${c.last4}`, due_on: c.due_date, kind: "tarjeta", link: "#/tarjetas", overdue: c.due_date < new Date().toISOString().slice(0, 10) }));
     const staleLots = (await env.DB.prepare("SELECT id, business_id, name, stage, dates, created_at FROM lots WHERE stage IN ('comprado','etiquetado')").all()).results
       .map((l) => ({ ...l, d: JSON.parse(l.dates || "{}").comprado || l.created_at.slice(0, 10) })).filter((l) => (Date.now() - new Date(l.d)) / 864e5 > 14)
@@ -811,9 +815,9 @@ async function api(req, env, url, user) {
     if (last4.length !== 4) return fail("Escribe solo los últimos 4 dígitos de la tarjeta.");
     if (!String(b.nickname || "").trim()) return fail("Ponle un nombre corto a la tarjeta (por ejemplo, Chase personal).");
     const day = (v) => { const n = parseInt(v, 10); return n >= 1 && n <= 31 ? n : null; };
-    const vals = [String(b.nickname).trim().slice(0, 60), b.issuer || null, NETWORKS.includes(b.network) ? b.network : null, b.holder || null, last4, day(b.exp_month) && day(b.exp_month) <= 12 ? day(b.exp_month) : null, Number(b.exp_year) > 2000 ? Number(b.exp_year) : null, b.owner === "empresa" ? "empresa" : "personal", b.entity_id || null, day(b.closing_day), day(b.due_day), num(b.credit_limit), b.notes || null];
-    if (m === "POST") { const id = uid(); await env.DB.prepare("INSERT INTO cards (id, nickname, issuer, network, holder, last4, exp_month, exp_year, owner, entity_id, closing_day, due_day, credit_limit, notes, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(id, ...vals, now()).run(); return json({ id }); }
-    await env.DB.prepare("UPDATE cards SET nickname = ?, issuer = ?, network = ?, holder = ?, last4 = ?, exp_month = ?, exp_year = ?, owner = ?, entity_id = ?, closing_day = ?, due_day = ?, credit_limit = ?, notes = ? WHERE id = ?").bind(...vals, mm[1]).run();
+    const vals = [String(b.nickname).trim().slice(0, 60), b.issuer || null, NETWORKS.includes(b.network) ? b.network : null, b.holder || null, last4, day(b.exp_month) && day(b.exp_month) <= 12 ? day(b.exp_month) : null, Number(b.exp_year) > 2000 ? Number(b.exp_year) : null, b.owner === "empresa" ? "empresa" : "personal", b.entity_id || null, day(b.closing_day), day(b.due_day), num(b.credit_limit), b.notes || null, b.card_type === "debito" ? "debito" : "credito"];
+    if (m === "POST") { const id = uid(); await env.DB.prepare("INSERT INTO cards (id, nickname, issuer, network, holder, last4, exp_month, exp_year, owner, entity_id, closing_day, due_day, credit_limit, notes, card_type, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(id, ...vals, now()).run(); return json({ id }); }
+    await env.DB.prepare("UPDATE cards SET nickname = ?, issuer = ?, network = ?, holder = ?, last4 = ?, exp_month = ?, exp_year = ?, owner = ?, entity_id = ?, closing_day = ?, due_day = ?, credit_limit = ?, notes = ?, card_type = ? WHERE id = ?").bind(...vals, mm[1]).run();
     await env.DB.prepare("DELETE FROM card_cycles WHERE card_id = ? AND paid = 0 AND file_id IS NULL AND closing_date >= ?").bind(mm[1], new Date().toISOString().slice(0, 10)).run();
     return json({ ok: true });
   }
@@ -1298,7 +1302,7 @@ async function dailyDigest(env) {
     env.DB.prepare("SELECT i.invoice_number, i.due_date, i.total, s.name AS supplier FROM invoices i LEFT JOIN suppliers s ON s.id = i.supplier_id WHERE i.payment_status = 'pendiente' AND i.due_date IS NOT NULL AND i.due_date <= ? ORDER BY i.due_date").bind(in7).all(),
   ]);
   await ensureCycles(env);
-  const cardsDue = (await env.DB.prepare("SELECT cc.due_date, c.nickname, c.last4 FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.active = 1 AND cc.paid = 0 AND cc.due_date <= ? AND cc.closing_date <= ? ORDER BY cc.due_date").bind(in7, new Date().toISOString().slice(0, 10)).all()).results;
+  const cardsDue = (await env.DB.prepare("SELECT cc.due_date, c.nickname, c.last4 FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.active = 1 AND c.card_type != 'debito' AND cc.paid = 0 AND cc.due_date <= ? AND cc.closing_date <= ? ORDER BY cc.due_date").bind(in7, new Date().toISOString().slice(0, 10)).all()).results;
   const cases = (await env.DB.prepare("SELECT title, case_number, due_date FROM amazon_cases WHERE status = 'abierto' AND due_date IS NOT NULL AND due_date <= ? ORDER BY due_date").bind(in7).all()).results;
   const tax = (await env.DB.prepare("SELECT tp.label, tp.due_date, o.name FROM tax_periods tp JOIN tax_obligations o ON o.id = tp.obligation_id WHERE o.active = 1 AND tp.status = 'pendiente' AND tp.due_date <= ? ORDER BY tp.due_date").bind(in30).all()).results;
   const today = new Date().toISOString().slice(0, 10);

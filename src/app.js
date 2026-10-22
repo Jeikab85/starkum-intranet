@@ -695,7 +695,8 @@ function scanItemDialog(b, it) {
 }
 // ---------- tarjetas ----------
 const NETS = ["Visa", "Mastercard", "American Express", "Discover", "Otra"];
-const cardText = (c) => `${c.nickname} · ${c.network || "Tarjeta"} •••• ${c.last4}`;
+const CTYPE = { credito: "Crédito", debito: "Débito" };
+const cardText = (c) => `${c.nickname} · ${CTYPE[c.card_type] || "Crédito"} ${c.network || ""} •••• ${c.last4}`.replace(/\s+/g, " ");
 function cardSelect(cards, selected, emptyLabel) {
   return h("select", { name: "card_id" }, h("option", { value: "" }, emptyLabel), cards.map((c) => h("option", { value: c.id, selected: c.id === selected }, cardText(c))));
 }
@@ -704,18 +705,32 @@ async function pageCards() {
   const { cards } = await api("/cards");
   const today = new Date().toISOString().slice(0, 10);
   const cyclesView = (c) => {
+    const debit = c.card_type === "debito";
     const rows = c.cycles.filter((x) => x.closing_date <= today || x.paid || x.file_id).slice(0, 4);
-    if (!c.closing_day || !c.due_day) return h("p", { class: "small muted", style: "margin:0" }, "Agrega el día de cierre y el de pago para recibir recordatorios.");
+    if (!debit && (!c.closing_day || !c.due_day)) return h("p", { class: "small muted", style: "margin:0" }, "Agrega el día de cierre y el de pago para recibir recordatorios y guardar los estados de cuenta.");
     const next = [...c.cycles].reverse().find((x) => !x.paid && x.due_date >= today);
     return h("div", { class: "stack", style: "gap:6px" },
-      next ? h("p", { class: "small", style: "margin:0" }, "Próximo pago: ", h("b", null, fdate(next.due_date)), ` (cierre ${fdate(next.closing_date)}). Mejor día para comprar: el día después del cierre.`) : "",
-      rows.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:520px" }, h("thead", null, h("tr", null, ["Cierre", "Pago", "Estado", "Estado de cuenta", ""].map((t) => h("th", null, t)))),
-        h("tbody", null, rows.map((x) => h("tr", null, h("td", { class: "mono" }, fdate(x.closing_date)), h("td", { class: "mono" }, fdate(x.due_date)),
-          h("td", null, x.paid ? pill("Pagada" + (x.paid_on ? " " + fdate(x.paid_on) : ""), "ok") : x.due_date < today ? pill("Vencida", "bad") : x.closing_date <= today ? pill("Por pagar", "warn") : pill("En curso", "")),
+      h("b", { class: "small" }, debit ? "Extractos bancarios" : "Estados de cuenta y pagos"),
+      !debit && next ? h("p", { class: "small", style: "margin:0" }, "Próximo pago: ", h("b", null, fdate(next.due_date)), ` (cierre ${fdate(next.closing_date)}). Mejor día para comprar: el día después del cierre.`) : "",
+      debit ? h("p", { class: "small muted", style: "margin:0" }, "Es de débito: no hay pagos que recordar. Sube el extracto de cada mes para usarlo como soporte de pago.") : "",
+      rows.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:520px" }, h("thead", null, h("tr", null, (debit ? ["Corte", "Extracto", ""] : ["Cierre", "Pago", "Estado", "Estado de cuenta", ""]).map((t) => h("th", null, t)))),
+        h("tbody", null, rows.map((x) => h("tr", null, h("td", { class: "mono" }, fdate(x.closing_date)),
+          debit ? "" : h("td", { class: "mono" }, fdate(x.due_date)),
+          debit ? "" : h("td", null, x.paid && !x.paid_on && x.due_date < c.created_at.slice(0, 10) ? h("span", { class: "small muted" }, "Antes de registrarla") : x.paid ? pill("Pagada" + (x.paid_on ? " " + fdate(x.paid_on) : ""), "ok") : x.due_date < today ? pill("Vencida", "bad") : x.closing_date <= today ? pill("Por pagar", "warn") : pill("En curso", "")),
           h("td", null, x.file_id ? h("a", { href: "/api/files/" + x.file_id, target: "_blank", rel: "noopener" }, "Ver") : h("span", { class: "muted small" }, "—")),
           h("td", { class: "only-admin" }, h("span", { class: "row", style: "gap:6px" },
-            x.closing_date <= today ? h("button", { class: "linkbtn small", type: "button", onclick: async () => { await api("/cards/cycles/" + x.id, { method: "PUT", body: { paid: !x.paid } }); toast(x.paid ? "Marcada como no pagada." : "Pago registrado."); route(); } }, x.paid ? "Desmarcar" : "Marcar pagada (total)") : "",
-            h("button", { class: "linkbtn small", type: "button", onclick: () => statementDialog(c, x) }, x.file_id ? "Cambiar estado de cuenta" : "Subir estado de cuenta")))))))) : "");
+            !debit && x.closing_date <= today && !(x.paid && !x.paid_on && x.due_date < c.created_at.slice(0, 10)) ? h("button", { class: "linkbtn small", type: "button", onclick: async () => { await api("/cards/cycles/" + x.id, { method: "PUT", body: { paid: !x.paid } }); toast(x.paid ? "Marcada como no pagada." : "Pago registrado."); route(); } }, x.paid ? "Desmarcar" : "Marcar pagada (total)") : "",
+            h("button", { class: "linkbtn small", type: "button", onclick: () => statementDialog(c, x) }, x.file_id ? "Cambiar archivo" : debit ? "Subir extracto" : "Subir estado de cuenta")))))))) : "");
+  };
+  const info = (c) => {
+    const debit = c.card_type === "debito";
+    const kv = (l, v) => h("div", null, h("span", null, l), h("b", null, v == null || v === "" ? "—" : v));
+    return h("div", { class: "kv" },
+      kv("Tipo", CTYPE[c.card_type] || "Crédito"), kv("Banco o emisor", c.issuer), kv("Red", c.network), kv("Titular", c.holder),
+      kv("Últimos 4 dígitos", "•••• " + c.last4), kv("Vencimiento", c.exp_month && c.exp_year ? `${String(c.exp_month).padStart(2, "0")}/${c.exp_year}` : ""),
+      debit ? kv("Día de corte del extracto", c.closing_day ? "Día " + c.closing_day : "Fin de mes") : kv("Día de cierre", c.closing_day ? "Día " + c.closing_day : ""),
+      debit ? "" : kv("Día límite de pago", c.due_day ? "Día " + c.due_day : ""), debit ? "" : kv("Límite de crédito", c.credit_limit != null ? money(c.credit_limit) : ""),
+      kv("Es de", c.owner === "empresa" ? "La empresa" : "Uso personal"), c.notes ? kv("Notas", c.notes) : "");
   };
   const page = h("div", { class: "page" },
     h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, "Pagos"), h("h1", null, "Tarjetas"),
@@ -723,21 +738,23 @@ async function pageCards() {
       h("button", { class: "btn primary only-admin", type: "button", onclick: () => cardDialog() }, "+ Agregar tarjeta")),
     cards.length ? h("div", { class: "stack", style: "gap:14px" }, cards.map((c) => h("section", { class: "card stack" },
       h("div", { class: "row between", style: "align-items:flex-start" },
-        h("div", { class: "row", style: "gap:14px;align-items:center" }, h("div", { class: "cardchip", "aria-hidden": "true" }, h("span", null, c.network || "Tarjeta"), h("b", { class: "mono" }, "•••• " + c.last4)),
+        h("div", { class: "row", style: "gap:14px;align-items:center" }, h("div", { class: "cardchip" + (c.card_type === "debito" ? " debit" : ""), "aria-hidden": "true" }, h("span", null, (c.network || "Tarjeta") + " · " + (CTYPE[c.card_type] || "Crédito")), h("b", { class: "mono" }, "•••• " + c.last4)),
           h("div", { class: "stack", style: "gap:2px" }, h("b", { style: "font-size:17px" }, c.nickname),
-            h("span", { class: "small muted" }, [c.issuer, c.holder, c.exp_month && c.exp_year ? `vence ${String(c.exp_month).padStart(2, "0")}/${c.exp_year}` : "", c.owner === "empresa" ? "de la empresa" : "personal"].filter(Boolean).join(" · ")),
             h("span", { class: "small" }, `${c.uses.n} factura${c.uses.n === 1 ? "" : "s"} pagada${c.uses.n === 1 ? "" : "s"} con ella · ${money(c.uses.total)}`))),
         h("div", { class: "row only-admin" }, h("button", { class: "btn sm", type: "button", onclick: () => cardDialog(c) }, "Editar"),
           h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Eliminar tarjeta", `Se borra ${c.nickname} •••• ${c.last4} y sus estados de cuenta. Las facturas no se borran: quedan sin tarjeta asociada.`, async () => { await api("/cards/" + c.id, { method: "DELETE" }); toast("Tarjeta eliminada."); route(); }) }, "Eliminar"))),
-      cyclesView(c)))) : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay tarjetas. Agrega cada tarjeta con la que compras inventario.")));
+      info(c), cyclesView(c)))) : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay tarjetas. Agrega cada tarjeta con la que compras inventario.")));
   shell(page, "tarjetas");
 }
 function cardDialog(c) {
-  let scanned = false;
   modal(c ? "Editar " + c.nickname : "Agregar tarjeta", () => {
     const F = {};
     const inp = (k, label, attrs = {}) => { F[k] = h("input", { name: k, value: c?.[k] ?? "", ...attrs }); return fld(label, F[k]); };
     const netSel = h("select", { name: "network" }, h("option", { value: "" }, "—"), NETS.map((n) => h("option", { selected: c?.network === n }, n))); F.network = netSel;
+    const typeSel = h("select", { name: "card_type", onchange: () => sync() }, Object.entries(CTYPE).map(([k, l]) => h("option", { value: k, selected: (c?.card_type || "credito") === k }, l))); F.card_type = typeSel;
+    const creditBox = h("div", { class: "fgrid" }, inp("closing_day", "Día de cierre del estado de cuenta", { type: "number", min: "1", max: "31" }), inp("due_day", "Día límite de pago", { type: "number", min: "1", max: "31" }), inp("credit_limit", "Límite de crédito (opcional)", { type: "number", step: "0.01" }));
+    const debitBox = h("div", { class: "fgrid" }, fld("Día de corte del extracto (opcional, si no, fin de mes)", h("input", { name: "debit_closing_day", type: "number", min: "1", max: "31", value: c?.card_type === "debito" ? c?.closing_day ?? "" : "" })));
+    function sync() { const debit = typeSel.value === "debito"; creditBox.style.display = debit ? "none" : ""; debitBox.style.display = debit ? "" : "none"; creditBox.querySelectorAll("input").forEach((x) => { x.disabled = debit; }); debitBox.querySelectorAll("input").forEach((x) => { x.disabled = !debit; }); }
     const scanNote = h("p", { class: "small muted", style: "margin:0" }, "Toma una foto del frente. Tapa o deja fuera el código de seguridad. La foto no se guarda: solo se leen los datos de abajo.");
     const scan = h("input", { type: "file", accept: "image/*", capture: "environment", onchange: async (e) => {
       const f = e.target.files[0]; if (!f) return;
@@ -745,28 +762,31 @@ function cardDialog(c) {
       try {
         const prep = await prepareUpload(f);
         const { card } = await api("/cards/read", { method: "POST", body: { image: prep.image } });
-        for (const k of ["issuer", "network", "holder", "last4", "exp_month", "exp_year"]) if (card[k]) F[k].value = card[k];
+        for (const k of ["card_type", "issuer", "network", "holder", "last4", "exp_month", "exp_year"]) if (card[k] && F[k]) F[k].value = card[k];
+        sync();
         if (!F.nickname.value && card.issuer) F.nickname.value = card.issuer + (card.network ? " " + card.network : "");
-        scanned = true; e.target.value = "";
-        scanNote.textContent = card.last4 ? "Listo. Revisa los datos y completa los días de cierre y de pago." : "No pude leer los últimos 4 dígitos. Escríbelos a mano.";
+        e.target.value = "";
+        scanNote.textContent = card.last4 ? "Listo. Revisa los datos (sobre todo si es de crédito o débito) y completa lo que falte." : "No pude leer los últimos 4 dígitos. Escríbelos a mano.";
       } catch (err) { scanNote.textContent = err.message; }
     } });
+    setTimeout(sync);
     return h("div", { class: "stack" },
       h("fieldset", null, h("legend", null, "Escanear la tarjeta (opcional)"), scan, scanNote),
-      h("div", { class: "fgrid" }, inp("nickname", "Nombre corto", { required: true, placeholder: "Por ejemplo: Chase personal" }), inp("issuer", "Banco o emisor"), fld("Red", netSel)),
+      h("div", { class: "fgrid" }, fld("Tipo", typeSel), inp("nickname", "Nombre corto", { required: true, placeholder: "Por ejemplo: Chase personal" }), inp("issuer", "Banco o emisor"), fld("Red", netSel)),
       h("div", { class: "fgrid" }, inp("holder", "Titular"), inp("last4", "Últimos 4 dígitos", { required: true, inputmode: "numeric", maxlength: "4", pattern: "\\d{4}" }), inp("exp_month", "Mes de vencimiento", { type: "number", min: "1", max: "12" }), inp("exp_year", "Año de vencimiento", { type: "number", min: "2024", max: "2099" })),
-      h("div", { class: "fgrid" }, inp("closing_day", "Día de cierre del estado de cuenta", { type: "number", min: "1", max: "31" }), inp("due_day", "Día límite de pago", { type: "number", min: "1", max: "31" }), inp("credit_limit", "Límite de crédito (opcional)", { type: "number", step: "0.01" }),
-        fld("Es de", h("select", { name: "owner" }, [["personal", "Uso personal"], ["empresa", "La empresa"]].map(([k, l]) => h("option", { value: k, selected: (c?.owner || "personal") === k }, l))))),
-      fld("Notas", h("input", { name: "notes", value: c?.notes || "" })));
+      creditBox, debitBox,
+      h("div", { class: "fgrid" }, fld("Es de", h("select", { name: "owner" }, [["personal", "Uso personal"], ["empresa", "La empresa"]].map(([k, l]) => h("option", { value: k, selected: (c?.owner || "personal") === k }, l)))), inp("notes", "Notas")));
   }, async (fd) => {
     const body = Object.fromEntries(fd);
     if (/\d{5,}/.test(body.last4 || "")) throw new Error("Escribe solo los últimos 4 dígitos.");
+    if (body.card_type === "debito") { body.closing_day = body.debit_closing_day || ""; body.due_day = ""; body.credit_limit = ""; }
+    delete body.debit_closing_day;
     await api(c ? "/cards/" + c.id : "/cards", { method: c ? "PUT" : "POST", body });
     toast(c ? "Tarjeta actualizada." : "Tarjeta agregada."); route();
   });
 }
 function statementDialog(c, x) {
-  modal(`Estado de cuenta ${c.nickname} · cierre ${fdate(x.closing_date)}`, () => h("div", { class: "stack" },
+  modal(`${c.card_type === "debito" ? "Extracto" : "Estado de cuenta"} ${c.nickname} · ${fdate(x.closing_date)}`, () => h("div", { class: "stack" },
     fld("Archivo (PDF o foto)", h("input", { name: "file", type: "file", accept: "application/pdf,image/*", required: true })),
     h("p", { class: "small muted", style: "margin:0" }, "Es el soporte que se adjunta cuando envías una factura pagada con esta tarjeta en ese período. Puedes tachar los movimientos personales antes de subirlo.")),
   async (fd, form) => {
