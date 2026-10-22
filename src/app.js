@@ -368,7 +368,10 @@ async function pageEntity(id, tab, q) {
         inFolder.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:640px" },
           h("thead", null, h("tr", null, h("th", null, "Documento"), h("th", null, "Emitido"), h("th", null, "Vence"), h("th", null, "Estado"), h("th", null, h("span", { class: "muted" }, "Acciones")))),
           h("tbody", null, inFolder.map((d) => h("tr", null,
-            h("td", null, h("b", null, d.title), h("br"), h("span", { class: "small muted" }, d.file_id ? `${ext(d.filename)} · ${bytes(d.size || 0)} · ${d.versions} versión${d.versions === 1 ? "" : "es"}` : "Sin archivo")),
+            h("td", null, h("b", null, d.title), h("br"), h("span", { class: "small muted" }, d.file_id ? `${ext(d.filename)} · ${bytes(d.size || 0)} · ${d.versions} versión${d.versions === 1 ? "" : "es"}` : "Sin archivo"),
+              folder === "Bancarios" && d.file_id ? h("div", { class: "small", style: "margin-top:4px" }, d.card_id
+                ? [pill(`${bankOf(d.card_issuer)} · ${d.card} •••• ${d.card_last4}`, "info"), isAdmin() ? h("button", { class: "linkbtn small", type: "button", style: "margin-left:6px", onclick: () => statementLinkDialog(d, id) }, "Cambiar") : ""]
+                : isAdmin() ? h("button", { class: "linkbtn small", type: "button", style: "padding:0;color:var(--warn)", onclick: () => statementLinkDialog(d, id) }, "Vincular a una cuenta o tarjeta") : h("span", { class: "muted" }, "Sin cuenta vinculada")) : ""),
             h("td", { class: "mono" }, fdate(d.issued_on)), h("td", { class: "mono" }, d.expires_on ? fdate(d.expires_on) : "No vence"),
             h("td", null, pill(d.state.label, d.state.key === "vigente" ? "ok" : d.state.key === "por_vencer" ? "warn" : "bad")),
             h("td", null, h("div", { class: "stack", style: "gap:6px" }, d.file_id ? fileActions(d.file_id, () => sendDialog({ doc_ids: [d.id] })) : "",
@@ -377,6 +380,18 @@ async function pageEntity(id, tab, q) {
               isAdmin() ? h("button", { class: "linkbtn small", type: "button", style: "color:var(--bad)", onclick: () => confirmDelete("Eliminar documento", `Se borra “${d.title}” con todas sus versiones (${d.versions}). No se puede deshacer.`, async () => { await api("/docs/" + d.id, { method: "DELETE" }); toast("Documento eliminado."); route(); }) }, "Eliminar") : "")))))))) :
           h("p", { class: "empty" }, "No hay documentos en esta carpeta. Usa “Subir documento”."))));
   shell(page, act);
+}
+async function statementLinkDialog(d, entityId) {
+  const { cards } = await api("/cards?entity=" + entityId);
+  const fm = String(d.filename || "").match(/(20\d{2})(\d{2})(\d{2})[-_ ]?statement/i);
+  const guess = fm ? `${fm[1]}-${fm[2]}-${fm[3]}` : d.issued_on || "";
+  modal("Vincular estado de cuenta", () => h("div", { class: "stack" },
+    h("p", { class: "small", style: "margin:0" }, h("b", null, d.title), " · ", d.filename || ""),
+    h("div", { class: "fgrid" },
+      fld("Cuenta o tarjeta", h("select", { name: "card_id" }, h("option", { value: "" }, "Ninguna"), byBank(cards).map(([bank, list]) => h("optgroup", { label: bank }, list.map((c) => h("option", { value: c.id, selected: d.card_id === c.id }, cardText(c))))))),
+      fld("Fecha de corte del estado de cuenta", h("input", { name: "closing_date", type: "date", value: guess }))),
+    h("p", { class: "small muted", style: "margin:0" }, "Es el mismo archivo para la cuenta y para la tarjeta de débito: aparece aquí y en Tarjetas, sin duplicarse. En el paquete del contador va una sola vez.")),
+  async (fd) => { const r = await api(`/docs/${d.id}/link`, { method: "POST", body: { card_id: fd.get("card_id"), closing_date: fd.get("closing_date") } }); toast(r.linked ? `Vinculado a ${r.linked.card} •••• ${r.linked.last4}, corte ${fdate(r.linked.closing)}.` : "Sin cuenta vinculada."); route(); }, "Vincular");
 }
 const PSTATE = { pendiente: ["Pendiente", "warn"], vencida: ["Vencida", "bad"], presentada: ["Presentada", "ok"], pagada: ["Pagada", "ok"], no_aplica: ["No aplica", ""] };
 async function taxSection(entityId) {
@@ -477,6 +492,7 @@ async function readCompanyDoc(docId, data, autoTitle) {
     if (r.tax_return?.created) parts.push(`creé “${r.tax_return.obligation}” con sus períodos`);
     if (r.tax_return?.label) parts.push(`registré la declaración de ${r.tax_return.label} como ${r.tax_return.status}`);
     else if (r.tax_return) parts.push("no encontré el período de esta declaración");
+    if (r.statement) parts.push(`lo vinculé a ${r.statement.card} •••• ${r.statement.last4} (corte ${fdate(r.statement.closing)})`);
     toast(parts.length ? "Documento guardado: " + parts.join("; ") + "." : "Documento guardado. No encontré datos nuevos para completar.");
   } catch (e) { toast("Documento guardado. " + e.message, true); }
 }
@@ -795,7 +811,7 @@ async function cardsView(entityId) {
     return h("div", { class: "stack", style: "gap:6px" },
       h("b", { class: "small" }, debit ? "Extractos bancarios" : "Estados de cuenta y pagos"),
       !debit && next ? h("p", { class: "small", style: "margin:0" }, "Próximo pago: ", h("b", null, fdate(next.due_date)), ` (cierre ${fdate(next.closing_date)}). Mejor día para comprar: el día después del cierre.`) : "",
-      debit ? h("p", { class: "small muted", style: "margin:0" }, "Es de débito: no hay pagos que recordar. Sube el extracto de cada mes para usarlo como soporte de pago.") : "",
+      debit ? h("p", { class: "small muted", style: "margin:0" }, "Es de débito: no hay pagos que recordar. El extracto de la cuenta es el mismo archivo que está en Documentos › Bancarios: súbelo en cualquiera de los dos lados y queda en ambos.") : "",
       rows.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:520px" }, h("thead", null, h("tr", null, (debit ? ["Corte", "Extracto", ""] : ["Cierre", "Pago", "Estado", "Estado de cuenta", ""]).map((t) => h("th", null, t)))),
         h("tbody", null, rows.map((x) => h("tr", null, h("td", { class: "mono" }, fdate(x.closing_date)),
           debit ? "" : h("td", { class: "mono" }, fdate(x.due_date)),

@@ -23,6 +23,7 @@ const MIGRATIONS = [
   "UPDATE money_moves SET kind = 'aporte' WHERE kind = 'transferencia' AND category = 'Aporte del dueño'",
   "ALTER TABLE subscriptions ADD COLUMN platform_ids TEXT NOT NULL DEFAULT '[]'",
   "ALTER TABLE invoices ADD COLUMN sub_id TEXT",
+  "ALTER TABLE company_docs ADD COLUMN card_id TEXT",
   "UPDATE suppliers SET kind = 'Herramientas/Suscripciones', status = COALESCE(NULLIF(status,'investigar'), 'activo') WHERE id IN (SELECT supplier_id FROM invoices WHERE kind = 'suscripción' AND supplier_id IS NOT NULL) AND COALESCE(kind, 'Otro') = 'Otro'",
   "UPDATE subscriptions SET platform_ids = COALESCE((SELECT json_group_array(p.id) FROM platforms p WHERE p.business_id = subscriptions.business_id), '[]') WHERE business_id IS NOT NULL AND platform_ids = '[]'",
 ];
@@ -75,6 +76,7 @@ async function ensureSchema(env) {
   }
   await backfillSuppliers(env);
   await seedTools(env);
+  await backfillStatements(env);
   schemaReady = true;
 }
 async function seed(env) {
@@ -230,6 +232,68 @@ async function seedTools(env) {
   if (amazon) for (const [n, u, d] of SUGGESTED_TOOLS) if (!has(amazonEnt, n)) q.push(add(amazonEnt, [amazon.id], amazon.business_id, n, u, d));
   q.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('seed_tools_v3', ?)").bind(now()));
   await env.DB.batch(q);
+}
+
+// ---------- estados de cuenta: un archivo para la cuenta (Documentos › Bancarios) y para la tarjeta de débito ----------
+const BANKS = [[/jp\s?morgan|chase/i, "Chase"], [/u\.?\s?s\.?\s?bank/i, "U.S. Bank"], [/discover/i, "Discover"], [/bank of america/i, "Bank of America"], [/wells fargo/i, "Wells Fargo"], [/capital one/i, "Capital One"], [/citi(bank)?\b/i, "Citi"], [/american express|amex/i, "American Express"], [/bancolombia/i, "Bancolombia"], [/davivienda/i, "Davivienda"], [/bbva/i, "BBVA"], [/nequi/i, "Nequi"], [/banco de bogot/i, "Banco de Bogotá"]];
+const bankKey = (t) => { const s = String(t || ""); for (const [re, n] of BANKS) if (re.test(s)) return n; return s.trim(); };
+const MON_IDX = { jan: 1, ene: 1, feb: 2, mar: 3, apr: 4, abr: 4, may: 5, jun: 6, jul: 7, aug: 8, ago: 8, sep: 9, oct: 10, nov: 11, dec: 12, dic: 12 };
+function statementInfo(text, filename) {
+  const t = String(text || ""); let end = null;
+  const fm = String(filename || "").match(/(?:^|[^\d])(20\d{2})(\d{2})(\d{2})[-_ ]?statement/i);
+  if (fm) end = `${fm[1]}-${fm[2]}-${fm[3]}`;
+  const all = [...t.matchAll(/(?:through|thru|to|al|hasta)\s+([A-Za-zé]{3,10})\.?\s+(\d{1,2}),?\s+(\d{4})/gi)].map((m) => { const mo = MON_IDX[m[1].toLowerCase().slice(0, 3)]; return mo ? `${m[3]}-${pad2(mo)}-${pad2(m[2])}` : null; }).filter(Boolean);
+  const nums = [...t.matchAll(/(?:through|thru|to|al|hasta)\s+(\d{1,2})\/(\d{1,2})\/(\d{2,4})/gi)].map((m) => `${m[3].length === 2 ? "20" + m[3] : m[3]}-${pad2(m[1])}-${pad2(m[2])}`);
+  if (!end) end = [...all, ...nums].sort().pop() || null;
+  const found = BANKS.find(([re]) => re.test(t) || re.test(filename || ""));
+  return { bank: found ? found[1] : null, period_end: end };
+}
+async function fileRefs(env, fileId) {
+  const r = await env.DB.prepare(`SELECT (SELECT COUNT(*) FROM company_docs WHERE file_id = ?1) + (SELECT COUNT(*) FROM card_cycles WHERE file_id = ?1) + (SELECT COUNT(*) FROM invoices WHERE file_id = ?1) + (SELECT COUNT(*) FROM money_moves WHERE file_id = ?1) + (SELECT COUNT(*) FROM settlements WHERE file_id = ?1) AS n`).bind(fileId).first();
+  return r?.n || 0;
+}
+async function dropFileIfUnused(env, fileId) {
+  if (!fileId || (await fileRefs(env, fileId)) > 0) return;
+  const f = await env.DB.prepare("SELECT r2_key FROM files WHERE id = ?").bind(fileId).first();
+  if (f) { await env.FILES.delete(f.r2_key); await env.DB.prepare("DELETE FROM files WHERE id = ?").bind(fileId).run(); }
+}
+// Liga el documento a la tarjeta en el ciclo cuyo corte está más cerca (±20 días); crea el ciclo si no existe.
+async function linkStatement(env, docId, cardId, closing) {
+  const doc = await env.DB.prepare("SELECT * FROM company_docs WHERE id = ?").bind(docId).first();
+  const card = await env.DB.prepare("SELECT * FROM cards WHERE id = ?").bind(cardId).first();
+  if (!doc || !doc.file_id || !card || !isoDate(closing)) return null;
+  closing = isoDate(closing);
+  await env.DB.prepare("UPDATE company_docs SET card_id = ?, issued_on = ? WHERE group_id = ?").bind(card.id, closing, doc.group_id).run();
+  const cycles = (await env.DB.prepare("SELECT * FROM card_cycles WHERE card_id = ?").bind(card.id).all()).results.filter((c) => dayDiff(c.closing_date, closing) <= 20).sort((a, z) => dayDiff(a.closing_date, closing) - dayDiff(z.closing_date, closing));
+  let cyc = cycles[0];
+  if (!cyc) {
+    const id = uid();
+    await env.DB.prepare("INSERT OR IGNORE INTO card_cycles (id, card_id, closing_date, due_date, paid, created_at) VALUES (?,?,?,?,1,?)").bind(id, card.id, closing, closing, now()).run();
+    cyc = await env.DB.prepare("SELECT * FROM card_cycles WHERE card_id = ? AND closing_date = ?").bind(card.id, closing).first();
+  }
+  const old = cyc.file_id;
+  if (old !== doc.file_id) {
+    await env.DB.prepare("UPDATE card_cycles SET file_id = ? WHERE id = ?").bind(doc.file_id, cyc.id).run();
+    if (old) { await env.DB.prepare("UPDATE bank_lines SET file_id = ? WHERE file_id = ?").bind(doc.file_id, old).run(); await dropFileIfUnused(env, old); }
+  }
+  return { card: card.nickname, last4: card.last4, closing: cyc.closing_date };
+}
+// Al subir el extracto desde la tarjeta de débito, queda también en Documentos › Bancarios (mismo archivo).
+async function statementDocFor(env, cycleId) {
+  const c = await env.DB.prepare("SELECT cc.*, cd.entity_id, cd.issuer, cd.card_type, cd.nickname FROM card_cycles cc JOIN cards cd ON cd.id = cc.card_id WHERE cc.id = ?").bind(cycleId).first();
+  if (!c || !c.file_id || c.card_type !== "debito") return;
+  if (await env.DB.prepare("SELECT id FROM company_docs WHERE file_id = ?").bind(c.file_id).first()) return;
+  const ent = c.entity_id || "llc";
+  const [y, mo] = c.closing_date.split("-");
+  const meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+  await env.DB.prepare("INSERT INTO company_docs (id, group_id, entity_id, folder, title, issued_on, file_id, card_id, version, created_at) VALUES (?,?,?,'Bancarios',?,?,?,?,1,?)")
+    .bind(uid(), uid(), ent, `Estado de cuenta ${bankKey(c.issuer) || c.nickname} · ${meses[Number(mo) - 1]} ${y}`, c.closing_date, c.file_id, c.card_id, now()).run();
+}
+async function backfillStatements(env) {
+  if (await env.DB.prepare("SELECT value FROM settings WHERE key = 'link_statements_v1'").first()) return;
+  const cyc = (await env.DB.prepare("SELECT cc.id FROM card_cycles cc JOIN cards cd ON cd.id = cc.card_id WHERE cd.card_type = 'debito' AND cc.file_id IS NOT NULL").all()).results;
+  for (const c of cyc) await statementDocFor(env, c.id);
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('link_statements_v1', ?)").bind(now()).run();
 }
 
 // ---------- roles ----------
@@ -758,7 +822,7 @@ async function api(req, env, url, user) {
   // Documentos de empresas
   if (p === "/docs" && m === "GET") {
     const ent = url.searchParams.get("entity") || "llc";
-    const rows = (await env.DB.prepare("SELECT d.*, f.filename, f.mime, f.size FROM company_docs d LEFT JOIN files f ON f.id = d.file_id WHERE d.entity_id = ? ORDER BY d.folder, d.title, d.version DESC").bind(ent).all()).results;
+    const rows = (await env.DB.prepare("SELECT d.*, f.filename, f.mime, f.size, c.nickname AS card, c.last4 AS card_last4, c.card_type, c.issuer AS card_issuer FROM company_docs d LEFT JOIN files f ON f.id = d.file_id LEFT JOIN cards c ON c.id = d.card_id WHERE d.entity_id = ? ORDER BY d.folder, d.title, d.version DESC").bind(ent).all()).results;
     const groups = {};
     for (const r of rows) (groups[r.group_id] ||= []).push(r);
     const docs = Object.values(groups).map((v) => ({ ...v[0], versions: v.length, history: v.map((x) => ({ id: x.id, version: x.version, file_id: x.file_id, filename: x.filename, created_at: x.created_at })), state: docStatus(v[0].expires_on) }));
@@ -789,6 +853,14 @@ async function api(req, env, url, user) {
     return json({ ok: true });
   }
 
+  if ((mm = p.match(/^\/docs\/([\w-]+)\/link$/)) && m === "POST") {
+    if (!isAdmin) return fail("Solo el administrador puede vincular estados de cuenta.", 403);
+    const b = await body();
+    if (!b.card_id) { await env.DB.prepare("UPDATE company_docs SET card_id = NULL WHERE id = ?").bind(mm[1]).run(); return json({ ok: true }); }
+    const r = await linkStatement(env, mm[1], b.card_id, b.closing_date);
+    if (!r) return fail("Elige la cuenta o tarjeta y la fecha de corte.");
+    return json({ ok: true, linked: r });
+  }
   if ((mm = p.match(/^\/docs\/([\w-]+)\/extract$/)) && m === "POST") {
     const b = await body();
     const doc = await env.DB.prepare("SELECT * FROM company_docs WHERE id = ?").bind(mm[1]).first();
@@ -822,7 +894,20 @@ async function api(req, env, url, user) {
     const tr = Object.assign({}, returnFromText(b.text) || {}, ...Object.entries(x.tax_return && typeof x.tax_return === "object" ? x.tax_return : {}).filter(([, v]) => v !== "" && v != null).map(([k, v]) => ({ [k]: v })));
     if (tr.period_end) taxReturn = await registerReturn(env, doc.entity_id, tr, doc);
     else if (x.tax_obligation && typeof x.tax_obligation === "object") obligation = await createObligation(env, doc.entity_id, x.tax_obligation, doc.id);
-    return json({ filled, dates: upd.map((u) => u[0]), obligation, tax_return: taxReturn, title, doc_type: x.doc_type || "", suggested_title: x.suggested_title || "", suggested_folder: FOLDERS.includes(x.suggested_folder) ? x.suggested_folder : null });
+    // Estado de cuenta: se liga solo a la cuenta o tarjeta de débito del mismo banco
+    let statement = null;
+    if (doc.folder === "Bancarios" || /bank_statement|statement/i.test(String(x.doc_type || ""))) {
+      const f = doc.file_id ? await env.DB.prepare("SELECT filename FROM files WHERE id = ?").bind(doc.file_id).first() : null;
+      const si = statementInfo(`${b.text || ""} ${x.suggested_title || ""} ${doc.title}`, f?.filename);
+      const closing = si.period_end || isoDate(x.issued_on);
+      if (si.bank && closing) {
+        const cards = (await env.DB.prepare("SELECT * FROM cards WHERE (entity_id = ? OR entity_id IS NULL OR entity_id = '') AND active = 1").bind(doc.entity_id).all()).results.filter((c) => bankKey(c.issuer) === si.bank);
+        const debit = cards.filter((c) => c.card_type === "debito");
+        const pick = debit.length === 1 ? debit[0] : cards.length === 1 ? cards[0] : null;
+        if (pick) statement = await linkStatement(env, doc.id, pick.id, closing);
+      }
+    }
+    return json({ statement, filled, dates: upd.map((u) => u[0]), obligation, tax_return: taxReturn, title, doc_type: x.doc_type || "", suggested_title: x.suggested_title || "", suggested_folder: FOLDERS.includes(x.suggested_folder) ? x.suggested_folder : null });
   }
 
   // Declaraciones por período
@@ -1045,8 +1130,8 @@ async function api(req, env, url, user) {
   }
   if ((mm = p.match(/^\/cards\/([\w-]+)$/)) && m === "DELETE") {
     const files = (await env.DB.prepare("SELECT file_id FROM card_cycles WHERE card_id = ? AND file_id IS NOT NULL").bind(mm[1]).all()).results;
-    for (const f of files) await removeFile(f.file_id);
-    await env.DB.batch([env.DB.prepare("UPDATE invoices SET card_id = NULL WHERE card_id = ?").bind(mm[1]), env.DB.prepare("DELETE FROM card_cycles WHERE card_id = ?").bind(mm[1]), env.DB.prepare("DELETE FROM cards WHERE id = ?").bind(mm[1])]);
+    await env.DB.batch([env.DB.prepare("UPDATE invoices SET card_id = NULL WHERE card_id = ?").bind(mm[1]), env.DB.prepare("UPDATE company_docs SET card_id = NULL WHERE card_id = ?").bind(mm[1]), env.DB.prepare("DELETE FROM card_cycles WHERE card_id = ?").bind(mm[1]), env.DB.prepare("DELETE FROM cards WHERE id = ?").bind(mm[1])]);
+    for (const f of files) await dropFileIfUnused(env, f.file_id); // los que también están en Documentos › Bancarios se quedan
     return json({ ok: true });
   }
   if ((mm = p.match(/^\/cards\/cycles\/([\w-]+)$/)) && m === "PUT") {
@@ -1059,8 +1144,13 @@ async function api(req, env, url, user) {
     const cyc = await env.DB.prepare("SELECT file_id FROM card_cycles WHERE id = ?").bind(mm[1]).first();
     if (!cyc) return fail("Ciclo no encontrado.", 404);
     const fileId = await storeFile(env, user, fd.get("file"), fd.get("original_size"));
-    if (cyc.file_id) { await env.DB.prepare("UPDATE bank_lines SET file_id = ? WHERE file_id = ?").bind(fileId, cyc.file_id).run(); await removeFile(cyc.file_id); }
     await env.DB.prepare("UPDATE card_cycles SET file_id = ? WHERE id = ?").bind(fileId, mm[1]).run();
+    if (cyc.file_id) {
+      await env.DB.prepare("UPDATE bank_lines SET file_id = ? WHERE file_id = ?").bind(fileId, cyc.file_id).run();
+      await env.DB.prepare("UPDATE company_docs SET file_id = ? WHERE file_id = ?").bind(fileId, cyc.file_id).run();
+      await dropFileIfUnused(env, cyc.file_id);
+    }
+    await statementDocFor(env, mm[1]);
     return json({ ok: true, file_id: fileId });
   }
 
@@ -1288,6 +1378,8 @@ async function api(req, env, url, user) {
       env.DB.prepare("SELECT d.id, d.folder, d.title, d.issued_on, d.created_at, d.file_id, f.filename FROM company_docs d JOIN files f ON f.id = d.file_id WHERE d.entity_id = ? AND d.folder IN ('Bancarios','Fiscales','Impuestos por año') AND COALESCE(d.issued_on, substr(d.created_at,1,10)) BETWEEN ? AND ? AND d.version = (SELECT MAX(version) FROM company_docs x WHERE x.group_id = d.group_id) ORDER BY d.folder, d.issued_on").bind(ent, from, to).all(),
     ]);
     if (!entity) return fail("Empresa no encontrada.", 404);
+    const stmtFiles = new Set(docs.results.map((x) => x.file_id));
+    cdocs.results = cdocs.results.filter((x) => !stmtFiles.has(x.file_id));
     await reconcile(env, ent, from, to);
     const [subs, bank, setts] = await Promise.all([
       env.DB.prepare("SELECT s.*, c.nickname AS card, c.last4 FROM subscriptions s LEFT JOIN cards c ON c.id = s.card_id WHERE s.entity_id = ?").bind(ent).all(),
@@ -1596,8 +1688,8 @@ async function api(req, env, url, user) {
     const d = await env.DB.prepare("SELECT group_id FROM company_docs WHERE id = ?").bind(mm[1]).first();
     if (!d) return fail("Documento no encontrado.", 404);
     const all = (await env.DB.prepare("SELECT id, file_id FROM company_docs WHERE group_id = ?").bind(d.group_id).all()).results;
-    for (const v of all) await removeFile(v.file_id);
     await env.DB.prepare("DELETE FROM company_docs WHERE group_id = ?").bind(d.group_id).run();
+    for (const v of all) if (v.file_id) { await env.DB.prepare("UPDATE card_cycles SET file_id = NULL WHERE file_id = ?").bind(v.file_id).run(); await removeFile(v.file_id); }
     return json({ ok: true, versions: all.length });
   }
 
