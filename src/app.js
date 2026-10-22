@@ -541,7 +541,9 @@ async function pageBusiness(id, tab, q) {
   shell(page, "negocio-" + id);
 }
 async function toolLinks(b) {
-  const { tools } = await api("/tools?business=" + b.id);
+  const [{ tools: own }, { subs }] = await Promise.all([api("/tools?business=" + b.id), api("/subs?business=" + b.id).catch(() => ({ subs: [] }))]);
+  const key = (n) => String(n || "").toLowerCase().replace(/\W/g, "");
+  const tools = [...own, ...subs.filter((x) => x.url && x.active && !own.some((t) => key(t.name) === key(x.name))).map((x) => ({ name: x.name, url: x.url, description: x.notes, sub: true }))];
   const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; } };
   const dlg = (t) => modal(t ? "Editar " + t.name : "Agregar herramienta", () => h("div", { class: "stack" },
     fld("Nombre", h("input", { name: "name", required: true, value: t?.name || "", placeholder: "Por ejemplo: SellerAmp" })),
@@ -561,7 +563,7 @@ async function toolLinks(b) {
       h("button", { class: "btn sm only-admin", type: "button", onclick: () => dlg() }, "+ Agregar")),
     tools.length ? h("div", { class: "toolgrid" }, tools.map((t) => h("div", { class: "toolwrap" },
       h("a", { class: "tooltile", href: t.url, target: "_blank", rel: "noopener", title: t.description || t.name }, h("span", { class: "toolimg" }, icon(t)), h("b", null, t.name)),
-      h("button", { class: "tooledit only-admin", type: "button", "aria-label": "Editar " + t.name, onclick: () => dlg(t) }, "✎"))))
+      t.sub ? h("a", { class: "tooledit only-admin", href: `#/negocio/${b.id}/suscripciones`, "aria-label": "Ver " + t.name + " en Suscripciones", title: "Se edita en Suscripciones" }, "✎") : h("button", { class: "tooledit only-admin", type: "button", "aria-label": "Editar " + t.name, onclick: () => dlg(t) }, "✎"))))
       : h("p", { class: "empty" }, "Agrega los enlaces de las herramientas que usas."));
 }
 function toolGrid(b) {
@@ -1163,64 +1165,69 @@ async function moveDialog(ent, line) {
 }
 
 // ---------- suscripciones ----------
-const CYCLE = { mensual: "Mensual", anual: "Anual" };
+const CYCLE = { mensual: "Mensual", anual: "Anual", gratis: "Gratis (sin cobro)" };
 async function subsView(ent, biz, q) {
-  const [{ subs }, { cards }] = await Promise.all([api(biz ? "/subs?business=" + biz.id : "/subs?entity=" + ent.id), api("/cards?entity=" + ent.id)]);
-  const bizs = state.businesses.filter((b) => b.entity_id === ent.id);
+  const [{ subs }, { cards }, { platforms }] = await Promise.all([api(biz ? "/subs?business=" + biz.id : "/subs?entity=" + ent.id), api("/cards?entity=" + ent.id), api("/platforms")]);
   const plat = biz ? null : q?.get("p") || "";
-  const shown = subs.filter((s) => !plat || (plat === "general" ? !s.business_id : s.business_id === plat));
-  const act = shown.filter((s) => s.active);
+  const shown = subs.filter((s) => !plat || (plat === "general" ? !s.platform_ids.length : s.platform_ids.includes(plat)));
+  const act = shown.filter((s) => s.active && !s.pending && s.cycle !== "gratis");
   const per = {}; for (const s of act) { const c = s.currency || "USD"; per[c] = per[c] || { m: 0, y: 0 }; per[c].m += s.cycle === "anual" ? s.amount / 12 : s.amount; per[c].y += s.cycle === "anual" ? s.amount : s.amount * 12; }
   const curs = Object.keys(per).length ? Object.keys(per) : [ent.id === "sas" ? "COP" : "USD"];
   const stat = (l, v) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, l), h("br"), h("b", null, v));
-  const groups = new Map();
-  for (const s of shown) { const k = s.business || "General de la empresa"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(s); }
   const base = biz ? `#/negocio/${biz.id}/suscripciones` : `#/empresa/${ent.id}/suscripciones`;
-  const filt = biz ? "" : h("div", { class: "chips", role: "tablist", "aria-label": "Plataforma" },
-    [["", "Todas"], ...bizs.map((b) => [b.id, b.name]), ["general", "General de la empresa"]].map(([k, l]) => h("a", { href: base + (k ? "?p=" + k : ""), class: "pill" + (plat === k ? " ok" : ""), role: "tab", "aria-selected": String(plat === k), style: "text-decoration:none" }, l)));
+  const usedPlats = platforms.filter((p) => subs.some((s) => s.platform_ids.includes(p.id)));
+  const filt = biz || !subs.length ? "" : h("div", { class: "chips", role: "tablist", "aria-label": "Plataforma" },
+    [["", "Todas"], ...usedPlats.map((p) => [p.id, p.name]), ...(subs.some((s) => !s.platform_ids.length) ? [["general", "General de la empresa"]] : [])].map(([k, l]) => h("a", { href: base + (k ? "?p=" + k : ""), class: "pill" + (plat === k ? " ok" : ""), role: "tab", "aria-selected": String(plat === k), style: "text-decoration:none" }, l)));
+  const pend = shown.filter((s) => s.pending && s.active).length;
   const row = (s) => h("tr", { style: s.active ? "" : "opacity:.55" },
-    h("td", null, s.url ? h("a", { href: s.url, target: "_blank", rel: "noopener", style: "font-weight:700" }, s.name) : h("b", null, s.name), s.notes ? h("div", { class: "small muted" }, s.notes) : ""),
-    h("td", { class: "mono" }, money(s.amount, s.currency)), h("td", null, CYCLE[s.cycle]),
-    h("td", { class: "mono" }, s.active ? fdate(s.next_charge) : h("span", { class: "small muted" }, "Cancelada " + fdate(s.ended_on))),
+    h("td", null, s.url ? h("a", { href: s.url, target: "_blank", rel: "noopener", style: "font-weight:700" }, s.name) : h("b", null, s.name), s.notes ? h("div", { class: "small muted", style: "max-width:320px" }, s.notes) : ""),
+    h("td", null, h("span", { class: "chips" }, s.platforms.length ? s.platforms.map((n) => pill(n, "info")) : pill("General"))),
+    h("td", { class: "mono" }, s.cycle === "gratis" ? pill("Gratis", "ok") : s.amount > 0 ? money(s.amount, s.currency) : "—"), h("td", null, s.pending || s.cycle === "gratis" ? "—" : CYCLE[s.cycle]),
+    h("td", { class: "mono" }, !s.active ? h("span", { class: "small muted" }, "Cancelada " + fdate(s.ended_on)) : s.pending ? pill("Por completar", "warn") : s.cycle === "gratis" ? "—" : fdate(s.next_charge)),
     h("td", { class: "small" }, s.card ? `${s.card} •••• ${s.last4}` : "—"),
-    h("td", null, pill(s.use_kind === "mixto" ? "Mixto" : "Empresa", s.use_kind === "mixto" ? "warn" : "ok")),
-    h("td", { class: "only-admin" }, h("button", { class: "linkbtn small", type: "button", onclick: () => subDialog(s, ent, biz, cards) }, "Editar")));
+    h("td", { class: "only-admin" }, h("button", { class: "linkbtn small", type: "button", onclick: () => subDialog(s, ent, cards, platforms) }, s.pending ? "Completar" : "Editar")));
   return h("div", { class: "stack", style: "gap:16px" },
-    h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:640px" }, biz ? `Las herramientas que pagas para ${biz.name}. Cada cobro sale en el paquete del contador y se compara con el estado de cuenta de la tarjeta.` : "Todas las herramientas que paga la empresa, por plataforma. Cada cobro sale en el paquete del contador y se compara con el estado de cuenta."),
-      h("button", { class: "btn primary sm only-upload", type: "button", onclick: () => subDialog(null, ent, biz, cards, plat && plat !== "general" ? plat : "") }, "+ Agregar suscripción")),
+    h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, biz ? `Las herramientas que usas en ${biz.name}. Si una también la usas en otra plataforma, es el mismo registro: se cobra una sola vez.` : "Cada herramienta es un solo registro aunque la uses en varias plataformas, así el cobro no se duplica. Cada cobro sale en el paquete del contador y se compara con el estado de cuenta."),
+      h("button", { class: "btn primary sm only-upload", type: "button", onclick: () => subDialog(null, ent, cards, platforms, plat && plat !== "general" ? plat : biz ? platforms.filter((p) => p.business_id === biz.id).map((p) => p.id)[0] : "") }, "+ Agregar herramienta")),
     filt,
-    h("div", { class: "grid g4" }, stat("Activas", act.length), ...curs.flatMap((c) => [stat("Al mes" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.m || 0, c)), stat("Al año" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.y || 0, c))])),
-    shown.length ? [...groups.entries()].map(([k, list]) => h("section", { class: "card stack" }, h("h2", null, k),
-      h("div", { class: "tablewrap" }, h("table", { style: "min-width:640px" }, h("thead", null, h("tr", null, ["Herramienta", "Valor", "Tipo", "Próximo cobro", "Tarjeta", "Uso", ""].map((c) => h("th", null, c)))), h("tbody", null, list.map(row))))))
-      : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay suscripciones aquí. Agrega cada herramienta que pagas (Keepa, SellerAmp, Shopify, Canva…).")),
+    h("div", { class: "grid g4" }, stat("Con cobro activo", act.length), ...curs.flatMap((c) => [stat("Al mes" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.m || 0, c)), stat("Al año" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.y || 0, c))]), stat("Por completar", pend)),
+    shown.length ? h("section", { class: "card stack" },
+      h("div", { class: "tablewrap" }, h("table", { style: "min-width:720px" }, h("thead", null, h("tr", null, ["Herramienta", "Plataformas", "Valor", "Tipo", "Próximo cobro", "Tarjeta", ""].map((c) => h("th", null, c)))), h("tbody", null, shown.map(row)))),
+      pend ? h("p", { class: "small muted", style: "margin:0" }, "Las que dicen \"Por completar\" todavía no cuentan como gasto. Cuando empieces a pagarlas, agrega el valor, el tipo, la fecha de cobro y la tarjeta.") : "")
+      : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay herramientas aquí.")),
     h("section", { class: "card stack" }, h("h2", null, "¿Cuentan como gasto de la empresa?"),
       h("p", { class: "small", style: "margin:0" }, ent.id === "sas"
         ? "Sí, si la herramienta se usa para el negocio. En Colombia el gasto necesita soporte: la factura electrónica del proveedor o, si es del exterior, el documento soporte. Guarda la factura de cada cobro y confirma con el contador el IVA y la retención de servicios del exterior."
         : "Sí, si la herramienta se usa para el negocio: en la LLC (Schedule C) son gastos deducibles y bajan la utilidad sobre la que pagas impuestos. Si también la usas para algo personal, solo cuenta la parte del negocio: márcala como \"Mixto\" y el contador decide el porcentaje."),
       h("p", { class: "small muted", style: "margin:0" }, "No soy contador: el contador confirma cómo se clasifica cada una.")));
 }
-function subDialog(s, ent, biz, cards, platDefault) {
-  const bizs = state.businesses.filter((b) => b.entity_id === ent.id);
-  modal(s ? "Editar " + s.name : "Agregar suscripción", () => h("div", { class: "stack" },
+function subDialog(s, ent, cards, platforms, platDefault) {
+  const sel = new Set(s ? s.platform_ids : platDefault ? [platDefault] : []);
+  modal(s ? s.name : "Agregar herramienta", () => h("div", { class: "stack" },
     h("div", { class: "fgrid" },
-      fld("Plataforma", h("select", { name: "business_id" }, h("option", { value: "" }, "General de la empresa"), bizs.map((b) => h("option", { value: b.id, selected: (s ? s.business_id : biz?.id || platDefault) === b.id }, b.name)))),
       fld("Herramienta", h("input", { name: "name", required: true, value: s?.name || "", placeholder: "Por ejemplo: Keepa" })),
       fld("Enlace (opcional)", h("input", { name: "url", value: s?.url || "", placeholder: "https://…", inputmode: "url" }))),
+    h("fieldset", null, h("legend", null, "Plataformas donde la usas"),
+      h("div", { class: "row", style: "gap:6px 16px;flex-wrap:wrap" }, platforms.map((p) => h("label", { class: "row", style: "gap:6px" }, h("input", { type: "checkbox", name: "plat", value: p.id, checked: sel.has(p.id), style: "width:auto" }), h("span", { class: "small" }, p.name, p.status === "sin_cuenta" ? h("span", { class: "muted" }, " (sin cuenta)") : "")))),
+      h("p", { class: "small muted", style: "margin:4px 0 0" }, "Marca todas las que apliquen. Es un solo registro: el cobro cuenta una vez. Sin marcar ninguna queda como general de la empresa.")),
+    h("p", { class: "small muted", style: "margin:0" }, "Datos del cobro: déjalos vacíos si todavía no la pagas. Si no tiene costo, elige el tipo \"Gratis\"."),
     h("div", { class: "fgrid" },
-      fld("Valor de la suscripción", h("input", { name: "amount", type: "number", step: "0.01", min: "0", required: true, inputmode: "decimal", value: s?.amount ?? "" })),
+      fld("Valor", h("input", { name: "amount", type: "number", step: "0.01", min: "0", inputmode: "decimal", value: s?.amount > 0 ? s.amount : "" })),
       fld("Moneda", h("select", { name: "currency" }, (ent.id === "sas" ? ["COP", "USD"] : ["USD", "COP"]).map((c) => h("option", { selected: s?.currency === c }, c)))),
       fld("Tipo", h("select", { name: "cycle" }, Object.entries(CYCLE).map(([k, l]) => h("option", { value: k, selected: (s?.cycle || "mensual") === k }, l)))),
-      fld("Fecha de cobro", h("input", { name: "charge_date", type: "date", required: true, value: s?.charge_date || "" }))),
-    h("p", { class: "small muted", style: "margin:-4px 0 0" }, "La fecha de un cobro real (el primero o el último). Con ella se calculan los siguientes: cada mes el mismo día, o cada año la misma fecha."),
+      fld("Fecha de cobro o renovación", h("input", { name: "charge_date", type: "date", value: s?.charge_date || "" }))),
     h("div", { class: "fgrid" },
       fld("Tarjeta con que se paga", h("select", { name: "card_id" }, h("option", { value: "" }, "—"), cards.map((c) => h("option", { value: c.id, selected: s?.card_id === c.id }, cardText(c))))),
       fld("Uso", h("select", { name: "use_kind" }, [["empresa", "Solo de la empresa"], ["mixto", "Mixto (empresa y personal)"]].map(([k, l]) => h("option", { value: k, selected: (s?.use_kind || "empresa") === k }, l)))),
       fld("Cancelada desde (si ya no la pagas)", h("input", { name: "ended_on", type: "date", value: s?.ended_on || "" }))),
     fld("Notas", h("input", { name: "notes", value: s?.notes || "" })),
-    s && isAdmin() ? h("button", { class: "btn danger sm", type: "button", style: "align-self:flex-start", onclick: () => confirmDelete("Eliminar suscripción", `Se borra ${s.name} y deja de salir en el paquete del contador. Si solo la cancelaste, mejor pon la fecha en "Cancelada desde" para conservar los cobros pasados.`, async () => { await api("/subs/" + s.id, { method: "DELETE" }); toast("Suscripción eliminada."); route(); }) }, "Eliminar") : ""),
-  async (fd) => { await api(s ? "/subs/" + s.id : "/subs", { method: s ? "PUT" : "POST", body: { ...Object.fromEntries(fd), entity_id: ent.id } }); toast(s ? "Suscripción actualizada." : "Suscripción agregada."); route(); });
+    s && isAdmin() ? h("button", { class: "btn danger sm", type: "button", style: "align-self:flex-start", onclick: () => confirmDelete("Eliminar herramienta", `Se borra ${s.name} de todas las plataformas y deja de salir en el paquete del contador. Si solo la cancelaste, mejor pon la fecha en "Cancelada desde" para conservar los cobros pasados.`, async () => { await api("/subs/" + s.id, { method: "DELETE" }); toast("Herramienta eliminada."); route(); }) }, "Eliminar") : ""),
+  async (fd) => {
+    const body = { ...Object.fromEntries(fd), platform_ids: fd.getAll("plat"), entity_id: ent.id }; delete body.plat;
+    if (body.cycle !== "gratis" && ((body.amount && !body.charge_date) || (!body.amount && body.charge_date))) throw new Error("Para que cuente el cobro, completa el valor y la fecha juntos (o deja los dos vacíos).");
+    await api(s ? "/subs/" + s.id : "/subs", { method: s ? "PUT" : "POST", body }); toast(s ? "Guardado." : "Herramienta agregada."); route();
+  });
 }
-
 // ---------- lectura de archivos: CSV, Excel y PDF ----------
 function parseDelimited(text) {
   text = text.replace(/^\uFEFF/, "");

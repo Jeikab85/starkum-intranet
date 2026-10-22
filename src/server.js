@@ -21,6 +21,8 @@ const MIGRATIONS = [
   "ALTER TABLE invoices ADD COLUMN card_id TEXT", "ALTER TABLE invoices ADD COLUMN card_last4 TEXT", "ALTER TABLE invoices ADD COLUMN lot_id TEXT",
   "UPDATE money_moves SET kind = 'retiro' WHERE kind = 'transferencia' AND category = 'Retiro del dueño'",
   "UPDATE money_moves SET kind = 'aporte' WHERE kind = 'transferencia' AND category = 'Aporte del dueño'",
+  "ALTER TABLE subscriptions ADD COLUMN platform_ids TEXT NOT NULL DEFAULT '[]'",
+  "UPDATE subscriptions SET platform_ids = COALESCE((SELECT json_group_array(p.id) FROM platforms p WHERE p.business_id = subscriptions.business_id), '[]') WHERE business_id IS NOT NULL AND platform_ids = '[]'",
 ];
 const MOVE_KINDS = ["ingreso", "gasto", "retiro", "aporte", "transferencia"];
 const LOGO_URL = "https://starkumholdings.com/wp-content/uploads/2026/08/starkum-holdings-logo.png";
@@ -70,6 +72,7 @@ async function ensureSchema(env) {
     await env.DB.prepare("INSERT OR IGNORE INTO recipients (email, label, created_at) VALUES (?, 'Correo principal', ?)").bind(admin, now()).run();
   }
   await backfillSuppliers(env);
+  await seedTools(env);
   schemaReady = true;
 }
 async function seed(env) {
@@ -106,6 +109,7 @@ function addMonthsClamp(iso, k, day) {
 }
 // Fechas de cobro de una suscripción dentro de [from, to]
 function subCharges(s, from, to) {
+  if (s.cycle === "gratis" || !s.charge_date || !(s.amount > 0)) return [];
   const out = []; const day = Number(s.charge_date.slice(8, 10)); const step = s.cycle === "anual" ? 12 : 1;
   for (let k = 0; k < 600; k++) {
     const d = addMonthsClamp(s.charge_date, k * step, day);
@@ -113,6 +117,12 @@ function subCharges(s, from, to) {
     if (d >= from) out.push(d);
   }
   return out;
+}
+async function platNames(env) { return new Map((await env.DB.prepare("SELECT id, name FROM platforms").all()).results.map((b) => [b.id, b.name])); }
+function subOut(s, names, today) {
+  let ids = []; try { ids = JSON.parse(s.platform_ids || "[]"); } catch { /* vacío */ }
+  const labels = ids.map((i) => names.get(i)).filter(Boolean);
+  return { ...s, platform_ids: ids, platforms: labels, platforms_label: labels.length ? labels.join(", ") : "General de la empresa", pending: s.cycle !== "gratis" && (!s.charge_date || !(s.amount > 0)), next_charge: nextCharge(s, today), active: !s.ended_on || s.ended_on >= today };
 }
 const nextCharge = (s, today) => (s.ended_on && s.ended_on < today ? null : subCharges(s, today, "9999-12-31")[0] || null);
 const shiftDate = (iso, days) => new Date(Date.parse(iso + "T00:00:00Z") + days * 864e5).toISOString().slice(0, 10);
@@ -186,6 +196,32 @@ async function readBank(env, { text, image }) {
     if (Array.isArray(x?.lines)) all.push(...x.lines);
   }
   return { period_end, lines: all };
+}
+
+// Herramientas sugeridas (una sola vez): quedan en Suscripciones con los datos de cobro por completar.
+// Las que ya estaban como enlace en Herramientas también pasan a Suscripciones, sin duplicarse.
+const SUGGESTED_TOOLS = [
+  ["SellerAmp SAS", "https://selleramp.com", "Análisis de productos para arbitraje y wholesale. Incluye la extensión WAMP para Walmart (beta): si la usas allá, marca también Walmart en la misma ficha."],
+  ["Keepa", "https://keepa.com", "Historial de precios, ventas y vendedores en Amazon."],
+  ["Ecom Circles", "https://ecomcircles.com", "Sirve para Amazon y Walmart: repricer, inventario y pedidos en un solo panel. Marca Walmart en la misma ficha cuando la uses allá."],
+  ["A2X", "https://www.a2xaccounting.com", "Pasa las liquidaciones de Amazon (y Walmart) a la contabilidad. Opcional por ahora."],
+];
+async function seedTools(env) {
+  if (await env.DB.prepare("SELECT value FROM settings WHERE key = 'seed_tools_v3'").first()) return;
+  const plats = (await env.DB.prepare("SELECT p.id, p.name, p.business_id, b.entity_id FROM platforms p LEFT JOIN businesses b ON b.id = p.business_id").all()).results;
+  const amazon = plats.find((x) => x.id === "amazon-us") || plats.find((x) => /amazon/i.test(x.name));
+  const amazonEnt = amazon?.entity_id || "llc";
+  const subs = (await env.DB.prepare("SELECT entity_id, name FROM subscriptions").all()).results;
+  const norm = (n) => n.toLowerCase().replace(/\W/g, "");
+  const has = (ent, name) => subs.some((x) => x.entity_id === ent && (norm(x.name).startsWith(norm(name)) || norm(name).startsWith(norm(x.name))));
+  const FREE = /app amazon seller|amazon seller app|calculadora|calculator|chrome web store/i;
+  const add = (ent, platIds, bizId, name, url, notes) => { subs.push({ entity_id: ent, name }); return env.DB.prepare("INSERT INTO subscriptions (id, entity_id, business_id, platform_ids, name, url, amount, currency, cycle, charge_date, use_kind, notes, created_at) VALUES (?,?,?,?,?,?,0,'USD',?,'','empresa',?,?)").bind(uid(), ent, bizId || null, JSON.stringify(platIds), name, url, FREE.test(name) ? "gratis" : "mensual", notes, now()); };
+  const q = [];
+  const links = (await env.DB.prepare("SELECT t.business_id, t.name, t.url, t.description, b.entity_id FROM tool_links t JOIN businesses b ON b.id = t.business_id WHERE b.entity_id IS NOT NULL AND b.entity_id != ''").all()).results;
+  for (const l of links) if (!has(l.entity_id, l.name)) q.push(add(l.entity_id, plats.filter((x) => x.business_id === l.business_id).map((x) => x.id), l.business_id, l.name, l.url, l.description || null));
+  if (amazon) for (const [n, u, d] of SUGGESTED_TOOLS) if (!has(amazonEnt, n)) q.push(add(amazonEnt, [amazon.id], amazon.business_id, n, u, d));
+  q.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('seed_tools_v3', ?)").bind(now()));
+  await env.DB.batch(q);
 }
 
 // ---------- roles ----------
@@ -1078,20 +1114,23 @@ async function api(req, env, url, user) {
   // Suscripciones (por plataforma o generales de la empresa)
   if (p === "/subs" && m === "GET") {
     const ent = url.searchParams.get("entity"); const biz = url.searchParams.get("business");
-    const rows = (await env.DB.prepare(`SELECT s.*, c.nickname AS card, c.last4, c.card_type, b.name AS business FROM subscriptions s LEFT JOIN cards c ON c.id = s.card_id LEFT JOIN businesses b ON b.id = s.business_id WHERE ${biz ? "s.business_id = ?" : "s.entity_id = ?"} ORDER BY s.ended_on IS NOT NULL, b.name, s.name`).bind(biz || ent).all()).results;
+    const rows = (await env.DB.prepare(`SELECT s.*, c.nickname AS card, c.last4, c.card_type FROM subscriptions s LEFT JOIN cards c ON c.id = s.card_id WHERE ${biz ? "EXISTS (SELECT 1 FROM json_each(s.platform_ids) j JOIN platforms p ON p.id = j.value WHERE p.business_id = ?)" : "s.entity_id = ?"} ORDER BY s.ended_on IS NOT NULL, s.name`).bind(biz || ent).all()).results;
+    const names = await platNames(env);
     const today = new Date().toISOString().slice(0, 10);
-    return json({ subs: rows.map((s) => ({ ...s, next_charge: nextCharge(s, today), active: !s.ended_on || s.ended_on >= today })) });
+    return json({ subs: rows.map((s) => subOut(s, names, today)) });
   }
   if ((p === "/subs" && m === "POST") || ((mm = p.match(/^\/subs\/([\w-]+)$/)) && m === "PUT")) {
     const b = await body();
-    const amount = num(b.amount); const date = isoDate(b.charge_date);
-    if (!String(b.name || "").trim() || !amount || !date) return fail("Completa el nombre, el valor y la fecha de cobro.");
-    let ent = b.entity_id;
-    if (b.business_id) ent = (await env.DB.prepare("SELECT entity_id FROM businesses WHERE id = ?").bind(b.business_id).first())?.entity_id || ent;
+    const amount = b.cycle === "gratis" ? 0 : Math.abs(num(b.amount) || 0); const date = isoDate(b.charge_date) || "";
+    if (!String(b.name || "").trim()) return fail("Escribe el nombre de la herramienta.");
+    const ent = b.entity_id;
     if (!["llc", "sas"].includes(ent)) return fail("Elige la empresa.");
-    const v = [ent, b.business_id || null, String(b.name).trim().slice(0, 120), String(b.url || "").trim() || null, Math.abs(amount), (b.currency || "USD").toUpperCase().slice(0, 3), b.cycle === "anual" ? "anual" : "mensual", date, isoDate(b.ended_on), b.card_id || null, b.use_kind === "mixto" ? "mixto" : "empresa", b.notes || null];
-    if (mm) await env.DB.prepare("UPDATE subscriptions SET entity_id=?, business_id=?, name=?, url=?, amount=?, currency=?, cycle=?, charge_date=?, ended_on=?, card_id=?, use_kind=?, notes=? WHERE id = ?").bind(...v, mm[1]).run();
-    else await env.DB.prepare("INSERT INTO subscriptions (entity_id, business_id, name, url, amount, currency, cycle, charge_date, ended_on, card_id, use_kind, notes, id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(...v, uid(), now()).run();
+    const plats = (await env.DB.prepare("SELECT id, business_id FROM platforms").all()).results;
+    const ids = [...new Set((Array.isArray(b.platform_ids) ? b.platform_ids : []).map(String))].filter((x) => plats.some((p) => p.id === x));
+    if (b.cycle === "gratis") b.amount = 0;
+    const v = [ent, (plats.find((p) => p.id === ids[0]) || {}).business_id || null, JSON.stringify(ids), String(b.name).trim().slice(0, 120), String(b.url || "").trim() || null, amount, (b.currency || "USD").toUpperCase().slice(0, 3), ["anual", "gratis"].includes(b.cycle) ? b.cycle : "mensual", b.cycle === "gratis" ? "" : date, isoDate(b.ended_on), b.card_id || null, b.use_kind === "mixto" ? "mixto" : "empresa", b.notes || null];
+    if (mm) await env.DB.prepare("UPDATE subscriptions SET entity_id=?, business_id=?, platform_ids=?, name=?, url=?, amount=?, currency=?, cycle=?, charge_date=?, ended_on=?, card_id=?, use_kind=?, notes=? WHERE id = ?").bind(...v, mm[1]).run();
+    else await env.DB.prepare("INSERT INTO subscriptions (entity_id, business_id, platform_ids, name, url, amount, currency, cycle, charge_date, ended_on, card_id, use_kind, notes, id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(...v, uid(), now()).run();
     return json({ ok: true });
   }
   if ((mm = p.match(/^\/subs\/([\w-]+)$/)) && m === "DELETE") {
@@ -1211,12 +1250,13 @@ async function api(req, env, url, user) {
     if (!entity) return fail("Empresa no encontrada.", 404);
     await reconcile(env, ent, from, to);
     const [subs, bank, setts] = await Promise.all([
-      env.DB.prepare("SELECT s.*, c.nickname AS card, c.last4, b.name AS business FROM subscriptions s LEFT JOIN cards c ON c.id = s.card_id LEFT JOIN businesses b ON b.id = s.business_id WHERE s.entity_id = ?").bind(ent).all(),
+      env.DB.prepare("SELECT s.*, c.nickname AS card, c.last4 FROM subscriptions s LEFT JOIN cards c ON c.id = s.card_id WHERE s.entity_id = ?").bind(ent).all(),
       env.DB.prepare("SELECT bl.*, c.nickname AS card, c.last4, c.card_type, f.filename FROM bank_lines bl LEFT JOIN cards c ON c.id = bl.card_id LEFT JOIN files f ON f.id = bl.file_id WHERE bl.entity_id = ? AND bl.posted_on BETWEEN ? AND ? ORDER BY bl.posted_on, bl.created_at").bind(ent, from, to).all(),
       env.DB.prepare("SELECT st.*, b.name AS business, f.filename FROM settlements st JOIN businesses b ON b.id = st.business_id LEFT JOIN files f ON f.id = st.file_id WHERE st.entity_id = ? AND st.period_end BETWEEN ? AND ? ORDER BY st.period_end").bind(ent, from, to).all(),
     ]);
     const matched = new Map(bank.results.filter((l) => l.match_kind === "suscripcion").map((l) => [l.match_id, l]));
-    const subCh = subs.results.flatMap((s) => subCharges(s, from, to).map((d) => ({ sub_id: s.id, date: d, name: s.name, business: s.business || "General de la empresa", amount: s.amount, currency: s.currency, cycle: s.cycle, use_kind: s.use_kind, card: s.card ? `${s.card} •••• ${s.last4}` : "", url: s.url, bank: matched.get(s.id + "@" + d) || null }))).sort((a, z) => a.date.localeCompare(z.date));
+    const bn = await platNames(env);
+    const subCh = subs.results.flatMap((s) => subCharges(s, from, to).map((d) => ({ sub_id: s.id, date: d, name: s.name, business: subOut(s, bn, from).platforms_label, amount: s.amount, currency: s.currency, cycle: s.cycle, use_kind: s.use_kind, card: s.card ? `${s.card} •••• ${s.last4}` : "", url: s.url, bank: matched.get(s.id + "@" + d) || null }))).sort((a, z) => a.date.localeCompare(z.date));
     return json({ entity: { id: entity.id, name: entity.name }, from, to, invoices: invs.results.map((i) => ({ ...i, items: JSON.parse(i.items || "[]") })), payouts: pays.results, tax: tax.results, statements: docs.results, moves: moves.results, docs: cdocs.results,
       sub_charges: subCh, bank: bank.results, settlements: setts.results.map((x) => ({ ...x, breakdown: JSON.parse(x.breakdown || "{}") })) });
   }
