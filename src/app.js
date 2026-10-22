@@ -300,7 +300,7 @@ async function companyHome(ent) {
       h("div", { class: "row between" }, h("div", null, h("h2", { id: "t-pla" }, "Plataformas"), h("span", { class: "small muted" }, "Las de " + ent.name + " y las que aún no tienen negocio")), h("a", { href: "#/plataformas", style: "font-weight:700" }, "Ver todas →")),
       h("div", { class: "grid g4" }, d.platforms.slice(0, 8).map((p) => { const st = PLAT_ST[p.status]; return h("a", { href: "#/plataformas", class: "filerow", style: "flex-direction:column;align-items:flex-start;gap:2px;color:var(--ink)" }, h("b", null, p.name), h("span", { class: "small muted" }, p.business_id ? (d.businesses.find((b) => b.id === p.business_id) || {}).name || "" : p.region), pill(st[0], st[1])); }))),
     h("div", { class: "grid g2" },
-      h("section", { class: "card", "aria-labelledby": "t-emp" }, h("h2", { id: "t-emp" }, "Accesos rápidos"),
+      h("section", { class: "card", "aria-labelledby": "t-emp" }, h("div", { class: "row between", style: "margin-bottom:8px" }, h("h2", { id: "t-emp" }, "Accesos rápidos"), h("a", { class: "btn primary sm", href: `#/empresa/${ent.id}/contador` }, "Descargar para el contador")),
         h("div", { class: "list" }, [["documentos", "Documentos", "Legales, fiscales, bancarios y declaraciones"], ["proveedores", "Proveedores", "Todos los de la empresa, por plataforma"], ["tarjetas", "Tarjetas", "Tarjetas y estados de cuenta"], ["contador", "Para el contador", "Excel y ZIP por mes, trimestre o año"]].map(([k, t, dsc]) => h("a", { href: `#/empresa/${ent.id}/${k}` }, h("span", { class: "stack", style: "gap:0" }, h("b", null, t), h("span", { class: "small muted" }, dsc)), "→")))),
       false && h("section", null,
         h("div", { class: "list" }, d.entities.map((e) => h("a", { href: "#/empresa/" + e.id }, h("span", { class: "stack", style: "gap:0" }, h("b", null, e.name), h("span", { class: "small muted" }, `${e.country} · ${e.docs} documento${e.docs === 1 ? "" : "s"}`)), e.issues ? pill(`${e.issues} por revisar`, "warn") : pill(e.docs ? "Al día" : "Sin documentos", e.docs ? "ok" : ""))))),
@@ -1017,6 +1017,7 @@ async function accountantView(ent, q) {
     kind === "trimestre" ? h("select", { "aria-label": "Trimestre", style: "width:auto", onchange: (e) => { location.hash = nav({ n: e.target.value }); } }, [1, 2, 3, 4].map((t) => h("option", { value: t, selected: t === n }, `${t}.º trimestre`))) : "",
     h("select", { "aria-label": "Año", style: "width:auto", onchange: (e) => { location.hash = nav({ anio: e.target.value }); } }, [now.getFullYear() + 1, now.getFullYear(), now.getFullYear() - 1, now.getFullYear() - 2].map((y) => h("option", { value: y, selected: y === year }, y))));
   const inv = d.invoices.filter((i) => i.kind !== "nota de crédito"), credits = d.invoices.filter((i) => i.kind === "nota de crédito");
+  const movIn = d.moves.filter((x) => x.kind === "ingreso"), movOut = d.moves.filter((x) => x.kind === "gasto"), movTr = d.moves.filter((x) => x.kind === "transferencia");
   const sum = (arr, k) => arr.reduce((a, x) => a + (Number(x[k]) || 0), 0);
   const group = (arr, key) => { const m = new Map(); for (const x of arr) { const k = x[key] || "Sin dato"; const g = m.get(k) || { k, n: 0, total: 0, tax: 0 }; g.n++; g.total += Number(x.total) || 0; g.tax += Number(x.tax) || 0; m.set(k, g); } return [...m.values()].sort((a, z) => z.total - a.total); };
   const cardOf = (i) => i.card ? `${i.card} · ${i.card_type === "debito" ? "Débito" : "Crédito"} •••• ${i.last4}` : i.card_last4 ? `•••• ${i.card_last4} (no registrada)` : "Sin tarjeta";
@@ -1034,6 +1035,7 @@ async function accountantView(ent, q) {
       { Concepto: "Facturas de compra", Valor: inv.length }, { Concepto: "Subtotal compras", Valor: sum(inv, "subtotal") }, { Concepto: "Impuesto de venta pagado en compras", Valor: sum(inv, "tax") },
       { Concepto: "Envíos cobrados", Valor: sum(inv, "shipping") }, { Concepto: "Descuentos", Valor: sum(inv, "discount") }, { Concepto: "Total compras", Valor: sum(inv, "total") },
       { Concepto: "Notas de crédito", Valor: sum(credits, "total") }, { Concepto: "Pagos recibidos de Amazon", Valor: sum(d.payouts, "amount") },
+      { Concepto: "Otros ingresos", Valor: sum(movIn, "amount") }, { Concepto: "Otros gastos", Valor: sum(movOut, "amount") }, { Concepto: "Transferencias (aportes y retiros)", Valor: sum(movTr, "amount") },
       { Concepto: "Facturas sin confirmar", Valor: missing.unconfirmed }, { Concepto: "Facturas sin tarjeta asociada", Valor: missing.noCard },
       { Concepto: "Generado", Valor: new Date().toLocaleString("es-US", { timeZone: "America/Chicago" }) }]);
     add("Compras", d.invoices.map((i) => ({ Fecha: i.issue_date || "", Tipo: i.kind, Negocio: i.business, Proveedor: i.supplier || "", "N.º fiscal proveedor": i.supplier_tax_id || "", "Factura": i.invoice_number || "", "Orden de compra": i.po_number || "",
@@ -1044,6 +1046,8 @@ async function accountantView(ent, q) {
     add("Por tarjeta", byCard.map((g) => ({ Tarjeta: g.k, Facturas: g.n, Total: g.total })));
     add("Pagos de Amazon", d.payouts.map((x) => ({ Fecha: x.paid_on, Negocio: x.business, Monto: x.amount, Lote: x.lot || "", Notas: x.notes || "" })));
     add("Declaraciones", d.tax.map((t) => ({ Obligación: t.obligation, Período: t.label, Desde: t.period_start, Hasta: t.period_end, Vence: t.due_date, Estado: t.status, Monto: t.amount ?? "", Presentada: t.filed_on || "", Notas: t.notes || "" })));
+    add("Otros movimientos", d.moves.map((x) => ({ Fecha: x.moved_on, Tipo: MOVE_KIND[x.kind], Categoría: x.category || "", Concepto: x.concept, Monto: x.kind === "gasto" ? -x.amount : x.amount, Moneda: x.currency, "Cuenta o tarjeta": x.card ? `${x.card} •••• ${x.last4}` : "", Negocio: x.business || "", Soporte: x.filename || "", Notas: x.notes || "" })));
+    add("Documentos", d.docs.map((x) => ({ Carpeta: x.folder, Documento: x.title, Fecha: x.issued_on || x.created_at.slice(0, 10), Archivo: x.filename })));
     add("Estados de cuenta", d.statements.map((x) => ({ Tarjeta: `${x.nickname} •••• ${x.last4}`, Tipo: x.card_type === "debito" ? "Débito" : "Crédito", Corte: x.closing_date, Pago: x.card_type === "debito" ? "" : x.due_date, Pagada: x.card_type === "debito" ? "" : x.paid ? "Sí" : "No", Archivo: x.filename })));
     return XLSX.write(wb, { bookType: "xlsx", type: "array" });
   }
@@ -1059,21 +1063,63 @@ async function accountantView(ent, q) {
     let nfiles = 0;
     for (const i of d.invoices) if (i.file_id) { zip.file(uniq(`Facturas/${fileName(i.business)}/${(i.issue_date || "sin-fecha").slice(0, 7)}/${fileName([i.issue_date, i.supplier, i.invoice_number].filter(Boolean).join(" "))}${extOf(i.filename)}`), await get(i.file_id)); nfiles++; }
     for (const x of d.statements) { zip.file(uniq(`Estados de cuenta/${fileName(x.nickname + " " + x.last4)}/${x.closing_date}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
+    for (const x of d.moves) if (x.file_id) { zip.file(uniq(`Otros movimientos/${x.moved_on.slice(0, 7)}/${fileName(`${x.moved_on} ${MOVE_KIND[x.kind]} ${x.concept}`)}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
+    for (const x of d.docs) { zip.file(uniq(`Documentos de la empresa/${fileName(x.folder)}/${fileName(x.title)}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
     for (const t of d.tax) for (const [fid, fn, tag] of [[t.return_file_id, t.return_filename, "declaración"], [t.payment_file_id, t.payment_filename, "pago"]]) if (fid) { zip.file(uniq(`Declaraciones/${fileName(t.obligation)}/${fileName(t.label)} - ${tag}${extOf(fn)}`), await get(fid)); nfiles++; }
     save(await zip.generateAsync({ type: "blob" }), base + ".zip"); toast(`Paquete listo: Excel y ${nfiles} archivo${nfiles === 1 ? "" : "s"}.`);
   }) }, "Descargar paquete (ZIP)");
   return h("div", { class: "stack", style: "gap:18px" },
     h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, "Paquete para el contador"), h("span", { class: "small muted" }, `${label} · todo lo de ${ent.name}, de todos sus negocios`)), sel),
-      h("div", { class: "row" }, zipBtn, xlsBtn, h("span", { class: "small muted" }, "El ZIP trae el Excel y los archivos: facturas por negocio y mes, estados de cuenta y declaraciones.")),
+      h("p", { class: "small", style: "margin:0" }, "Todo lo financiero de la empresa llega aquí solo, sin importar dónde lo subas: facturas de cualquier negocio, pagos de Amazon, estados de cuenta de las tarjetas, documentos bancarios y fiscales, declaraciones y los movimientos que agregues abajo."),
+      h("div", { class: "row" }, zipBtn, xlsBtn, h("span", { class: "small muted" }, "El ZIP trae el Excel y todos los archivos ordenados por carpeta.")),
       missing.unconfirmed || missing.noCard ? h("p", { class: "small", style: "margin:0;color:var(--warn)" }, [missing.unconfirmed ? `${missing.unconfirmed} factura(s) sin confirmar` : "", missing.noCard ? `${missing.noCard} sin tarjeta asociada` : ""].filter(Boolean).join(" · ") + ". Conviene revisarlas antes de mandarle el paquete.") : ""),
-    h("div", { class: "grid g4" }, stat("Compras", money(sum(inv, "total"))), stat("Impuesto de venta pagado", money(sum(inv, "tax"))), stat("Pagos de Amazon", money(sum(d.payouts, "amount"))), stat("Facturas", inv.length)),
+    h("div", { class: "grid g4" }, stat("Compras (facturas)", money(sum(inv, "total"))), stat("Impuesto de venta pagado", money(sum(inv, "tax"))), stat("Pagos de Amazon", money(sum(d.payouts, "amount"))), stat("Facturas", inv.length),
+      stat("Otros ingresos", money(sum(movIn, "amount"))), stat("Otros gastos", money(sum(movOut, "amount"))), stat("Estados de cuenta", d.statements.length), stat("Documentos bancarios y fiscales", d.docs.length)),
+    h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, "Otros movimientos"), h("span", { class: "small muted" }, "Lo que no es una factura de compra: comisiones del banco, suscripciones, depósitos, aportes o retiros del dueño…")),
+        h("button", { class: "btn primary sm only-upload", type: "button", onclick: () => moveDialog(ent) }, "+ Agregar movimiento")),
+      d.moves.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:620px" }, h("thead", null, h("tr", null, ["Fecha", "Tipo", "Concepto", "Monto", "Cuenta", "Soporte", ""].map((c) => h("th", null, c)))),
+        h("tbody", null, d.moves.map((x) => h("tr", null, h("td", { class: "mono" }, fdate(x.moved_on)), h("td", null, pill(MOVE_KIND[x.kind], x.kind === "ingreso" ? "ok" : x.kind === "gasto" ? "warn" : "info")),
+          h("td", null, x.concept, x.category ? h("div", { class: "small muted" }, x.category) : ""), h("td", { class: "mono" }, (x.kind === "gasto" ? "−" : "") + money(x.amount, x.currency)),
+          h("td", { class: "small" }, x.card ? `${x.card} •••• ${x.last4}` : "—"), h("td", null, x.file_id ? h("a", { href: "/api/files/" + x.file_id, target: "_blank", rel: "noopener" }, "Ver") : "—"),
+          h("td", { class: "only-admin" }, h("button", { class: "linkbtn small", type: "button", style: "color:var(--bad)", onclick: () => confirmDelete("Eliminar movimiento", "Se borra el movimiento y su soporte.", async () => { await api("/moves/" + x.id, { method: "DELETE" }); route(); }) }, "Eliminar")))))))
+        : h("p", { class: "empty" }, "No hay otros movimientos en este período.")),
+    d.docs.length ? table("Documentos bancarios y fiscales del período", d.docs, [["Carpeta", (x) => x.folder], ["Documento", (x) => x.title], ["Fecha", (x) => fdate(x.issued_on || x.created_at), "mono"], ["", (x) => h("a", { href: "/api/files/" + x.file_id, target: "_blank", rel: "noopener" }, "Ver")]]) : "",
     table("Por negocio", byBiz, [["Negocio", (g) => g.k], ["Facturas", (g) => g.n, "mono"], ["Impuesto", (g) => money(g.tax), "mono"], ["Total", (g) => money(g.total), "mono"]]),
     table("Por proveedor", bySup, [["Proveedor", (g) => g.k], ["Facturas", (g) => g.n, "mono"], ["Impuesto", (g) => money(g.tax), "mono"], ["Total", (g) => money(g.total), "mono"]]),
     table("Por tarjeta", byCard, [["Tarjeta", (g) => g.k], ["Facturas", (g) => g.n, "mono"], ["Total", (g) => money(g.total), "mono"]]),
     table("Declaraciones del período", d.tax, [["Obligación", (t) => t.obligation], ["Período", (t) => t.label], ["Vence", (t) => fdate(t.due_date), "mono"], ["Estado", (t) => pill(...(PSTATE[t.status] || [t.status, ""]))], ["Monto", (t) => t.amount != null ? money(t.amount) : "—", "mono"]]),
-    !d.invoices.length && !d.payouts.length && !d.tax.length ? h("section", { class: "card" }, h("p", { class: "empty" }, "No hay movimientos en este período.")) : "");
+    !d.invoices.length && !d.payouts.length && !d.tax.length && !d.moves.length ? h("section", { class: "card" }, h("p", { class: "empty" }, "No hay facturas ni pagos en este período.")) : "");
 }
 
+const MOVE_KIND = { ingreso: "Ingreso", gasto: "Gasto", transferencia: "Transferencia" };
+const MOVE_CAT = {
+  gasto: ["Inventario / costo de mercancía", "Tarifas de Amazon u otras plataformas", "Envíos y fletes", "Empaque y etiquetas", "Software y suscripciones", "Comisiones bancarias", "Impuestos, licencias y trámites", "Publicidad", "Oficina y equipo", "Servicios profesionales", "Otros gastos"],
+  ingreso: ["Ventas", "Reembolsos", "Intereses", "Otros ingresos"],
+  transferencia: ["Aporte del dueño", "Retiro del dueño", "Entre cuentas propias"],
+};
+async function moveDialog(ent) {
+  const { cards } = await api("/cards?entity=" + ent.id);
+  const bizs = state.businesses.filter((b) => b.entity_id === ent.id);
+  modal("Agregar movimiento", () => {
+    const cat = h("select", { name: "category" });
+    const kindSel = h("select", { name: "kind", onchange: () => fill() }, Object.entries(MOVE_KIND).map(([k, l]) => h("option", { value: k, selected: k === "gasto" }, l)));
+    const fill = () => cat.replaceChildren(...MOVE_CAT[kindSel.value].map((c) => h("option", null, c)));
+    fill();
+    return h("div", { class: "stack" },
+      h("div", { class: "fgrid" }, fld("Tipo", kindSel), fld("Categoría", cat), fld("Fecha", h("input", { name: "moved_on", type: "date", required: true, value: new Date().toISOString().slice(0, 10) }))),
+      h("div", { class: "fgrid" }, fld("Monto", h("input", { name: "amount", type: "number", step: "0.01", required: true, inputmode: "decimal" })), fld("Moneda", h("select", { name: "currency" }, (ent.id === "sas" ? ["COP", "USD"] : ["USD", "COP"]).map((c) => h("option", null, c)))),
+        fld("Cuenta o tarjeta", h("select", { name: "card_id" }, h("option", { value: "" }, "—"), cards.map((c) => h("option", { value: c.id }, cardText(c)))))),
+      fld("Concepto", h("input", { name: "concept", required: true, placeholder: "Por ejemplo: comisión mensual del banco, suscripción de Keepa…" })),
+      bizs.length ? fld("Negocio (opcional)", h("select", { name: "business_id" }, h("option", { value: "" }, "General de la empresa"), bizs.map((b) => h("option", { value: b.id }, b.name)))) : "",
+      fld("Soporte (opcional: foto, PDF del extracto o comprobante)", h("input", { name: "file", type: "file", accept: "image/*,application/pdf" })),
+      fld("Notas", h("input", { name: "notes" })));
+  }, async (fd, form) => {
+    fd.set("entity_id", ent.id);
+    const f = fd.get("file");
+    if (f && f.size) { form.querySelector("[type=submit]").textContent = "Subiendo…"; const prep = await prepareUpload(f); fd.set("file", prep.file); fd.set("original_size", prep.originalSize); } else fd.delete("file");
+    await api("/moves", { method: "POST", body: fd }); toast("Movimiento agregado al resumen del contador."); route();
+  }, "Agregar");
+}
 // ---------- aprobaciones de marca y categoría ----------
 const APR_ST = { por_solicitar: ["Por solicitar", "warn"], solicitada: ["Solicitada", "info"], aprobada: ["Aprobada", "ok"], rechazada: ["Rechazada", "bad"] };
 async function approvalsView(b) {

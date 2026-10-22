@@ -99,7 +99,7 @@ const ROLES = ["admin", "standard", "viewer"];
 const normRole = (r) => (r === "member" ? "standard" : ROLES.includes(r) ? r : "standard");
 const STANDARD_WRITES = [
   ["POST", /^\/invoices$/], ["POST", /^\/invoices\/[\w-]+\/extract$/], ["PUT", /^\/invoices\/[\w-]+$/],
-  ["POST", /^\/docs$/], ["POST", /^\/docs\/[\w-]+\/extract$/], ["POST", /^\/tax\/periods\/[\w-]+\/file$/], ["POST", /^\/records$/], ["POST", /^\/send$/], ["POST", /^\/scan\/logs$/], ["POST", /^\/lots$/],
+  ["POST", /^\/docs$/], ["POST", /^\/docs\/[\w-]+\/extract$/], ["POST", /^\/tax\/periods\/[\w-]+\/file$/], ["POST", /^\/records$/], ["POST", /^\/send$/], ["POST", /^\/scan\/logs$/], ["POST", /^\/lots$/], ["POST", /^\/moves$/],
 ];
 function permissionError(role, method, path) {
   if (method === "GET" || path === "/auth/logout" || role === "admin") return null;
@@ -952,11 +952,35 @@ async function api(req, env, url, user) {
     return json({ items });
   }
 
+  // Otros movimientos de dinero de la empresa (ingresos, gastos y transferencias que no son facturas de compra)
+  if (p === "/moves" && m === "GET") {
+    const ent = url.searchParams.get("entity"); const from = isoDate(url.searchParams.get("from")) || "0000"; const to = isoDate(url.searchParams.get("to")) || "9999";
+    const rows = (await env.DB.prepare("SELECT mv.*, c.nickname AS card, c.last4, b.name AS business, f.filename FROM money_moves mv LEFT JOIN cards c ON c.id = mv.card_id LEFT JOIN businesses b ON b.id = mv.business_id LEFT JOIN files f ON f.id = mv.file_id WHERE mv.entity_id = ? AND mv.moved_on BETWEEN ? AND ? ORDER BY mv.moved_on DESC, mv.created_at DESC").bind(ent, from, to).all()).results;
+    return json({ moves: rows });
+  }
+  if (p === "/moves" && m === "POST") {
+    const fd = await req.formData(); const g = (k) => { const v = fd.get(k); return v == null || v === "" ? null : String(v); };
+    const kind = ["ingreso", "gasto", "transferencia"].includes(g("kind")) ? g("kind") : null;
+    const amount = num(g("amount")); const date = isoDate(g("moved_on"));
+    if (!kind || !amount || !date || !g("concept") || !["llc", "sas"].includes(g("entity_id"))) return fail("Completa tipo, fecha, monto y concepto.");
+    const file = fd.get("file");
+    const fileId = file && file.size ? await storeFile(env, user, file, fd.get("original_size")) : null;
+    await env.DB.prepare("INSERT INTO money_moves (id, entity_id, kind, moved_on, amount, currency, concept, category, card_id, business_id, file_id, notes, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(uid(), g("entity_id"), kind, date, Math.abs(amount), (g("currency") || "USD").toUpperCase().slice(0, 3), g("concept").slice(0, 200), g("category"), g("card_id"), g("business_id"), fileId, g("notes"), user.email, now()).run();
+    return json({ ok: true });
+  }
+  if ((mm = p.match(/^\/moves\/([\w-]+)$/)) && m === "DELETE") {
+    const mv = await env.DB.prepare("SELECT file_id FROM money_moves WHERE id = ?").bind(mm[1]).first();
+    if (mv?.file_id) await removeFile(mv.file_id);
+    await env.DB.prepare("DELETE FROM money_moves WHERE id = ?").bind(mm[1]).run();
+    return json({ ok: true });
+  }
+
   // Paquete para el contador: todo lo de la empresa en un período
   if (p === "/accounting" && m === "GET") {
     const ent = url.searchParams.get("entity"); const from = isoDate(url.searchParams.get("from")); const to = isoDate(url.searchParams.get("to"));
     if (!ent || !from || !to) return fail("Elige la empresa y el período.");
-    const [entity, invs, pays, tax, docs] = await Promise.all([
+    const [entity, invs, pays, tax, docs, moves, cdocs] = await Promise.all([
       env.DB.prepare("SELECT * FROM entities WHERE id = ?").bind(ent).first(),
       env.DB.prepare(`SELECT i.id, i.kind, i.invoice_number, i.po_number, i.issue_date, i.due_date, i.currency, i.subtotal, i.tax, i.shipping, i.discount, i.total, i.payment_status, i.payment_method, i.status, i.items, i.card_last4,
           COALESCE(s.name, i.supplier_name) AS supplier, s.tax_id AS supplier_tax_id, b.name AS business, c.nickname AS card, c.card_type, c.network, c.last4, c.issuer, l.name AS lot, f.id AS file_id, f.filename, f.size
@@ -965,9 +989,11 @@ async function api(req, env, url, user) {
       env.DB.prepare("SELECT p.*, b.name AS business, l.name AS lot FROM payouts p JOIN businesses b ON b.id = p.business_id LEFT JOIN lots l ON l.id = p.lot_id WHERE b.entity_id = ? AND p.paid_on BETWEEN ? AND ? ORDER BY p.paid_on").bind(ent, from, to).all(),
       env.DB.prepare("SELECT tp.*, o.name AS obligation, o.agency, f1.filename AS return_filename, f2.filename AS payment_filename FROM tax_periods tp JOIN tax_obligations o ON o.id = tp.obligation_id LEFT JOIN files f1 ON f1.id = tp.return_file_id LEFT JOIN files f2 ON f2.id = tp.payment_file_id WHERE o.entity_id = ? AND tp.period_end >= ? AND tp.period_start <= ? ORDER BY tp.period_start").bind(ent, from, to).all(),
       env.DB.prepare("SELECT cc.*, c.nickname, c.last4, c.card_type, f.filename, f.size FROM card_cycles cc JOIN cards c ON c.id = cc.card_id JOIN files f ON f.id = cc.file_id WHERE (c.entity_id IS NULL OR c.entity_id = '' OR c.entity_id = ?) AND cc.closing_date BETWEEN ? AND ? ORDER BY cc.closing_date").bind(ent, from, to).all(),
+      env.DB.prepare("SELECT mv.*, c.nickname AS card, c.last4, b.name AS business, f.filename FROM money_moves mv LEFT JOIN cards c ON c.id = mv.card_id LEFT JOIN businesses b ON b.id = mv.business_id LEFT JOIN files f ON f.id = mv.file_id WHERE mv.entity_id = ? AND mv.moved_on BETWEEN ? AND ? ORDER BY mv.moved_on").bind(ent, from, to).all(),
+      env.DB.prepare("SELECT d.id, d.folder, d.title, d.issued_on, d.created_at, d.file_id, f.filename FROM company_docs d JOIN files f ON f.id = d.file_id WHERE d.entity_id = ? AND d.folder IN ('Bancarios','Fiscales','Impuestos por año') AND COALESCE(d.issued_on, substr(d.created_at,1,10)) BETWEEN ? AND ? AND d.version = (SELECT MAX(version) FROM company_docs x WHERE x.group_id = d.group_id) ORDER BY d.folder, d.issued_on").bind(ent, from, to).all(),
     ]);
     if (!entity) return fail("Empresa no encontrada.", 404);
-    return json({ entity: { id: entity.id, name: entity.name }, from, to, invoices: invs.results.map((i) => ({ ...i, items: JSON.parse(i.items || "[]") })), payouts: pays.results, tax: tax.results, statements: docs.results });
+    return json({ entity: { id: entity.id, name: entity.name }, from, to, invoices: invs.results.map((i) => ({ ...i, items: JSON.parse(i.items || "[]") })), payouts: pays.results, tax: tax.results, statements: docs.results, moves: moves.results, docs: cdocs.results });
   }
 
   // Lotes y pagos de Amazon
