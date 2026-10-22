@@ -982,6 +982,33 @@ async function api(req, env, url, user) {
       .bind(...supFields.map((f) => (f === "brand_auth" ? b[f] || "pendiente" : b[f] ?? null)), JSON.stringify(b.platforms || []), mm[1]).run();
     return json({ ok: true });
   }
+  // Cambiar la clasificación. Al pasar a Herramientas/Suscripciones, sus facturas cuentan como facturas de suscripción
+  // y se ligan a la herramienta con el mismo nombre en Suscripciones (si existe).
+  if ((mm = p.match(/^\/suppliers\/([\w-]+)\/kind$/)) && m === "PUT") {
+    const b = await body();
+    const kinds = ["Fabricante", "Distribuidor autorizado", "Mayorista", "Liquidación", "Arbitraje", "Herramientas/Suscripciones", "Otro"];
+    if (!kinds.includes(b.kind)) return fail("Clasificación no válida.");
+    const sup = await env.DB.prepare("SELECT s.id, s.name, s.status, s.kind, bz.entity_id FROM suppliers s LEFT JOIN businesses bz ON bz.id = s.business_id WHERE s.id = ?").bind(mm[1]).first();
+    if (!sup) return fail("Proveedor no encontrado.", 404);
+    const tool = b.kind === "Herramientas/Suscripciones";
+    await env.DB.prepare("UPDATE suppliers SET kind = ?, status = ? WHERE id = ?").bind(b.kind, tool && (!sup.status || sup.status === "investigar") ? "activo" : sup.status, sup.id).run();
+    let moved = 0, linked = null;
+    if (tool) {
+      moved = (await env.DB.prepare("UPDATE invoices SET kind = 'suscripción' WHERE supplier_id = ? AND kind IN ('factura', 'recibo', 'otro')").bind(sup.id).run()).meta?.changes || 0;
+      const key = normName(sup.name).split(" ")[0];
+      const subs = key && key.length >= 3 ? (await env.DB.prepare("SELECT * FROM subscriptions WHERE entity_id = ?").bind(sup.entity_id || "llc").all()).results.filter((x) => normName(x.name).includes(key)) : [];
+      if (subs.length === 1) {
+        const sub = subs[0]; linked = sub.name;
+        await env.DB.prepare("UPDATE invoices SET sub_id = ? WHERE supplier_id = ? AND sub_id IS NULL").bind(sub.id, sup.id).run();
+        const last = await env.DB.prepare("SELECT total, currency, issue_date, card_id FROM invoices WHERE supplier_id = ? AND total > 0 ORDER BY issue_date DESC LIMIT 1").bind(sup.id).first();
+        if (last && sub.cycle !== "gratis" && (!(sub.amount > 0) || !sub.charge_date))
+          await env.DB.prepare("UPDATE subscriptions SET amount = ?, currency = ?, charge_date = COALESCE(NULLIF(charge_date,''), ?), card_id = COALESCE(card_id, ?) WHERE id = ?").bind(last.total, last.currency || "USD", last.issue_date || "", last.card_id || null, sub.id).run();
+      }
+    } else if (sup.kind === "Herramientas/Suscripciones") {
+      moved = (await env.DB.prepare("UPDATE invoices SET kind = 'factura', sub_id = NULL WHERE supplier_id = ? AND kind = 'suscripción'").bind(sup.id).run()).meta?.changes || 0;
+    }
+    return json({ ok: true, invoices: moved, linked });
+  }
   if ((mm = p.match(/^\/suppliers\/([\w-]+)\/status$/)) && m === "PUT") {
     const b = await body();
     if (!SUP_STATUS.includes(b.status)) return fail("Estado no válido.");

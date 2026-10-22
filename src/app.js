@@ -629,7 +629,7 @@ function supplierDialog(target, s) {
   const sp = s?.platforms || [];
   modal(s ? "Editar " + s.name : "Agregar proveedor", () => h("div", { class: "stack" },
     h("div", { class: "fgrid" }, fld("Nombre", h("input", { name: "name", required: true, value: s?.name || "" })),
-      fld("Tipo", h("select", { name: "kind" }, ["Fabricante", "Distribuidor autorizado", "Mayorista", "Liquidación", "Arbitraje", TOOL_KIND, "Otro"].map((k) => h("option", { selected: s?.kind === k }, k))))),
+      fld("Tipo", h("select", { name: "kind" }, SUP_KINDS.map((k) => h("option", { selected: s?.kind === k }, k))))),
     h("div", { class: "fgrid" }, fld("Estado", h("select", { name: "status" }, Object.entries(SUP_ST).map(([k, v]) => h("option", { value: k, selected: (s?.status || "investigar") === k }, v[0])))),
       fld("¿Permite vender en Amazon?", h("select", { name: "amazon_policy" }, h("option", { value: "" }, "Sin dato"), Object.entries(AMZ_POL).map(([k, v]) => h("option", { value: k, selected: s?.amazon_policy === k }, v[0])))),
       fld("Riesgo de bloqueo", h("select", { name: "risk" }, h("option", { value: "" }, "Sin dato"), ["bajo", "medio", "alto"].map((k) => h("option", { value: k, selected: s?.risk === k }, k[0].toUpperCase() + k.slice(1))))),
@@ -649,6 +649,7 @@ function supplierDialog(target, s) {
   });
 }
 const TOOL_KIND = "Herramientas/Suscripciones";
+const SUP_KINDS = ["Fabricante", "Distribuidor autorizado", "Mayorista", "Liquidación", "Arbitraje", TOOL_KIND, "Otro"];
 const SUP_ORDER = { listo: 0, contactado: 1, activo: 2, investigar: 3, no_enviar: 4, descartado: 5 };
 function suppliersList(b, suppliers, q, ctx = {}) {
   const base = ctx.base || `#/negocio/${b.id}`;
@@ -1653,7 +1654,7 @@ async function pageSupplier(scope, ownerId, sid, q) {
     h("nav", { class: "crumbs", "aria-label": "Ruta" }, h("a", { href: ctx.base }, b.name), "›", h("a", { href: `${ctx.base}/proveedores` }, "Proveedores"), "›", h("b", { style: "color:var(--ink)" }, s.name)),
     h("section", { class: "card stack" },
       h("div", { class: "row between", style: "align-items:flex-start" }, h("div", { class: "stack", style: "gap:6px" }, h("h1", null, s.name),
-        h("span", { class: "chips" }, pill(...(SUP_ST[s.status || "investigar"])), s.amazon_policy ? pill(...AMZ_POL[s.amazon_policy]) : "", s.risk ? pill(...RISK[s.risk]) : "", s.kind ? pill(s.kind.split(" (")[0]) : "", s.platforms.map((p) => pill(p)), s.brand_auth === "si" ? pill("Autorización de marca: probada", "ok") : s.brand_auth === "no" ? pill("Sin autorización de marca", "bad") : pill("Autorización de marca: pendiente", "warn"))),
+        h("span", { class: "chips" }, pill(...(SUP_ST[s.status || "investigar"])), s.amazon_policy ? pill(...AMZ_POL[s.amazon_policy]) : "", s.risk ? pill(...RISK[s.risk]) : "", s.kind ? pill(s.kind.split(" (")[0]) : "", s.platforms.map((p) => pill(p)), s.kind === TOOL_KIND ? "" : s.brand_auth === "si" ? pill("Autorización de marca: probada", "ok") : s.brand_auth === "no" ? pill("Sin autorización de marca", "bad") : pill("Autorización de marca: pendiente", "warn"))),
         h("div", { class: "row" }, h("button", { class: "btn only-admin", type: "button", onclick: () => supplierDialog(null, s) }, "Editar"),
           isAdmin() ? h("button", { class: "btn danger", type: "button", onclick: () => confirmDelete("Eliminar proveedor", `Se borra la ficha de ${s.name}. Sus facturas no se borran: quedan en el archivo del negocio, sin proveedor asignado.`, async () => {
             await api("/suppliers/" + s.id, { method: "DELETE" }); toast("Proveedor eliminado."); location.hash = `${ctx.base}/proveedores`;
@@ -1667,7 +1668,11 @@ async function pageSupplier(scope, ownerId, sid, q) {
         s.website ? h("a", { href: /^https?:/.test(s.website) ? s.website : "https://" + s.website, target: "_blank", rel: "noopener" }, "Sitio web") : ""),
       isAdmin() ? h("div", { class: "row", style: "gap:8px" }, h("span", { class: "small muted" }, "Cambiar estado:"), h("select", { "aria-label": "Estado del proveedor", style: "width:auto", onchange: async (e) => {
         await api(`/suppliers/${s.id}/status`, { method: "PUT", body: { status: e.target.value } }); toast("Estado actualizado: " + SUP_ST[e.target.value][0] + "."); route(); } },
-        Object.entries(SUP_ST).map(([k, v]) => h("option", { value: k, selected: (s.status || "investigar") === k }, v[0])))) : ""),
+        Object.entries(SUP_ST).map(([k, v]) => h("option", { value: k, selected: (s.status || "investigar") === k }, v[0]))),
+        h("span", { class: "small muted", style: "margin-left:14px" }, "Clasificación:"), h("select", { "aria-label": "Clasificación del proveedor", style: "width:auto", onchange: async (e) => {
+          const r = await api(`/suppliers/${s.id}/kind`, { method: "PUT", body: { kind: e.target.value } });
+          toast("Clasificación: " + e.target.value + "." + (r.invoices ? ` ${r.invoices} factura(s) actualizada(s).` : "") + (r.linked ? ` Ligadas a ${r.linked} en Suscripciones.` : "")); route(); } },
+          SUP_KINDS.map((k) => h("option", { value: k, selected: (s.kind || "Otro") === k }, k)))) : ""),
     s.decision || s.amazon_note || s.risk_note ? h("section", { class: "card stack" }, h("h2", null, "Lo que encontró el Cerebro"),
       h("div", { class: "stack small", style: "gap:8px" },
         s.decision ? h("div", null, h("b", null, "Decisión: "), s.decision) : "",
