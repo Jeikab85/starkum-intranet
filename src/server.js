@@ -560,7 +560,7 @@ async function api(req, env, url, user) {
       env.DB.prepare("SELECT * FROM entities ORDER BY id").all(),
       env.DB.prepare("SELECT d.entity_id, d.title, d.expires_on FROM company_docs d WHERE d.version = (SELECT MAX(version) FROM company_docs x WHERE x.group_id = d.group_id)").all(),
       env.DB.prepare("SELECT * FROM deadlines WHERE done = 0 ORDER BY due_on LIMIT 8").all(),
-      env.DB.prepare("SELECT i.id, i.title, i.invoice_number, i.issue_date, i.created_at, i.status, b.name AS business, s.name AS supplier FROM invoices i JOIN businesses b ON b.id = i.business_id LEFT JOIN suppliers s ON s.id = i.supplier_id ORDER BY i.created_at DESC LIMIT 6").all(),
+      env.DB.prepare("SELECT i.id, i.title, i.invoice_number, i.issue_date, i.created_at, i.status, b.name AS business, b.entity_id, s.name AS supplier FROM invoices i JOIN businesses b ON b.id = i.business_id LEFT JOIN suppliers s ON s.id = i.supplier_id ORDER BY i.created_at DESC LIMIT 40").all(),
       env.DB.prepare("SELECT * FROM platforms ORDER BY sort").all(),
       env.DB.prepare("SELECT COALESCE(SUM(size),0) AS bytes, COUNT(*) AS n FROM files").first(),
     ]);
@@ -574,14 +574,20 @@ async function api(req, env, url, user) {
       .map((t) => ({ title: `${t.name} · ${t.label}`, entity_id: t.entity_id, due_on: t.due_date, kind: "impuesto", overdue: t.due_date < new Date().toISOString().slice(0, 10) }));
     await ensureCycles(env);
     const cardDue = (await env.DB.prepare("SELECT cc.due_date, c.nickname, c.last4, c.entity_id FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.active = 1 AND c.card_type != 'debito' AND cc.paid = 0 AND cc.due_date <= ? AND cc.closing_date <= ? ORDER BY cc.due_date LIMIT 6").bind(new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10), new Date().toISOString().slice(0, 10)).all()).results
-      .map((c) => ({ title: `Pagar el total de la tarjeta ${c.nickname} •••• ${c.last4}`, due_on: c.due_date, kind: "tarjeta", link: `#/empresa/${c.entity_id || "llc"}/tarjetas`, overdue: c.due_date < new Date().toISOString().slice(0, 10) }));
-    const staleLots = (await env.DB.prepare("SELECT id, business_id, name, stage, dates, created_at FROM lots WHERE stage IN ('comprado','etiquetado')").all()).results
+      .map((c) => ({ title: `Pagar el total de la tarjeta ${c.nickname} •••• ${c.last4}`, due_on: c.due_date, kind: "tarjeta", entity_id: c.entity_id || null, link: `#/empresa/${c.entity_id || "llc"}/tarjetas`, overdue: c.due_date < new Date().toISOString().slice(0, 10) }));
+    const staleLots = (await env.DB.prepare("SELECT l.id, l.business_id, l.name, l.stage, l.dates, l.created_at, b.entity_id FROM lots l JOIN businesses b ON b.id = l.business_id WHERE l.stage IN ('comprado','etiquetado')").all()).results
       .map((l) => ({ ...l, d: JSON.parse(l.dates || "{}").comprado || l.created_at.slice(0, 10) })).filter((l) => (Date.now() - new Date(l.d)) / 864e5 > 14)
-      .map((l) => ({ title: `${l.name}: lleva ${Math.floor((Date.now() - new Date(l.d)) / 864e5)} días sin enviarse a Amazon`, due_on: l.d, kind: "lote", link: `#/negocio/${l.business_id}/lotes`, overdue: true }));
-    const caseDue = (await env.DB.prepare("SELECT id, business_id, title, case_number, due_date FROM amazon_cases WHERE status = 'abierto' AND due_date IS NOT NULL").all()).results
-      .map((c) => ({ title: `Caso de Amazon: ${c.title}${c.case_number ? " (" + c.case_number + ")" : ""}`, due_on: c.due_date, kind: "caso", link: `#/negocio/${c.business_id}/casos?c=${c.id}`, overdue: c.due_date < new Date().toISOString().slice(0, 10) }));
-    const upcoming = [...dls.results.map((d) => ({ title: d.title, entity_id: d.entity_id, due_on: d.due_on, kind: "fecha", id: d.id })), ...expiring, ...taxDue, ...cardDue, ...staleLots, ...caseDue].sort((a, b) => a.due_on.localeCompare(b.due_on)).slice(0, 8);
-    return json({ businesses: biz.results, entities, upcoming, recent: recent.results, platforms: plats.results, usage: { ...usage, free: STORAGE_FREE_BYTES } });
+      .map((l) => ({ title: `${l.name}: lleva ${Math.floor((Date.now() - new Date(l.d)) / 864e5)} días sin enviarse a Amazon`, due_on: l.d, kind: "lote", entity_id: l.entity_id, link: `#/negocio/${l.business_id}/lotes`, overdue: true }));
+    const caseDue = (await env.DB.prepare("SELECT c.id, c.business_id, c.title, c.case_number, c.due_date, b.entity_id FROM amazon_cases c JOIN businesses b ON b.id = c.business_id WHERE c.status = 'abierto' AND c.due_date IS NOT NULL").all()).results
+      .map((c) => ({ title: `Caso de Amazon: ${c.title}${c.case_number ? " (" + c.case_number + ")" : ""}`, due_on: c.due_date, kind: "caso", entity_id: c.entity_id, link: `#/negocio/${c.business_id}/casos?c=${c.id}`, overdue: c.due_date < new Date().toISOString().slice(0, 10) }));
+    const all = [...dls.results.map((d) => ({ title: d.title, entity_id: d.entity_id, due_on: d.due_on, kind: "fecha", id: d.id })), ...expiring, ...taxDue, ...cardDue, ...staleLots, ...caseDue].sort((a, b) => a.due_on.localeCompare(b.due_on));
+    const ent = url.searchParams.get("entity");
+    const mine = (x) => !ent || !x.entity_id || x.entity_id === ent;
+    const today = new Date().toISOString().slice(0, 10);
+    const byEntity = Object.fromEntries(entities.map((e) => [e.id, { businesses: biz.results.filter((b) => b.entity_id === e.id).length, upcoming: all.filter((x) => !x.entity_id || x.entity_id === e.id).length, overdue: all.filter((x) => (!x.entity_id || x.entity_id === e.id) && (x.overdue || x.due_on < today)).length }]));
+    const bizIds = new Set(biz.results.filter((b) => !ent || b.entity_id === ent).map((b) => b.id));
+    return json({ businesses: biz.results.filter((b) => !ent || b.entity_id === ent), all_businesses: biz.results, entities: entities.map((e) => ({ ...e, summary: byEntity[e.id] })), upcoming: all.filter(mine).slice(0, 10), recent: recent.results.filter((r) => !ent || r.entity_id === ent).slice(0, 6),
+      platforms: plats.results.filter((p) => !ent || !p.business_id || bizIds.has(p.business_id)), usage: { ...usage, free: STORAGE_FREE_BYTES } });
   }
 
   // Empresas

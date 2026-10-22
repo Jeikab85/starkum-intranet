@@ -59,7 +59,8 @@ async function busy(btn, fn) {
   const label = btn.textContent; btn.disabled = true; btn.replaceChildren(h("span", { class: "spinner", "aria-hidden": "true" }), " Un momento…");
   try { return await fn(); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; btn.textContent = label; }
 }
-const state = { user: null, businesses: [], entities: [], stale: false };
+const state = { user: null, businesses: [], entities: [], stale: false, entity: null };
+function setEntity(id) { state.entity = id || null; try { id ? localStorage.setItem("empresa", id) : localStorage.removeItem("empresa"); } catch { /* sin almacenamiento */ } }
 const APP_VERSION = "__APP_VERSION__";
 const ROLE_LABEL = { admin: "Administrador", standard: "Usuario estándar", viewer: "Solo consulta" };
 const ROLE_HELP = { admin: "Puede hacer todo: editar, eliminar, dar accesos.", standard: "Ve todo, sube facturas y documentos, revisa lo que sube y envía a correos autorizados. No edita ni elimina.", viewer: "Solo ve y descarga. No sube ni cambia nada." };
@@ -90,17 +91,28 @@ function renderLogin(stepEmail) {
 
 // ---------- estructura ----------
 function shell(content, active) {
+  const ent = state.entities.find((e) => e.id === state.entity);
+  const a = (href, key, label, cls = "") => h("a", { href, class: (active === key ? "on " : "") + cls }, label);
   const nav = h("nav", { class: "side", id: "side", "aria-label": "Menú principal" },
     h("a", { class: "brand", href: "#/" }, logo("light", 38), h("span", { class: "brandtext" }, h("b", null, "Starkum Holdings"), h("span", null, "Intranet"))),
-    h("div", { class: "navgroup" },
-      h("a", { href: "#/", class: active === "inicio" ? "on" : "" }, "Inicio"),
-      h("a", { href: "#/plataformas", class: active === "plataformas" ? "on" : "" }, "Plataformas")),
-    h("div", { class: "navgroup" }, h("span", { class: "label" }, "Empresas"),
-      state.entities.map((e) => h("a", { href: "#/empresa/" + e.id, class: active === "empresa-" + e.id ? "on" : "" }, e.name))),
-    h("div", { class: "navgroup" }, h("span", { class: "label" }, "Negocios"),
-      state.businesses.map((b) => h("a", { href: "#/negocio/" + b.id, class: active === "negocio-" + b.id ? "on" : "" }, b.name)),
-      h("a", { href: "#/nuevo-negocio", class: "add only-admin" }, "+ Agregar negocio")),
-    h("div", { class: "navgroup" }, h("a", { href: "#/ajustes", class: active === "ajustes" ? "on" : "" }, "Accesos y ajustes")),
+    ent ? [
+      h("div", { class: "navgroup" }, h("span", { class: "label" }, "Empresa"),
+        h("a", { href: "#/", class: "entswitch", title: "Volver a elegir empresa" }, h("b", null, ent.name), h("span", null, "Cambiar de empresa")),
+        a(`#/empresa/${ent.id}`, `empresa-${ent.id}-inicio`, "Inicio"),
+        a(`#/empresa/${ent.id}/documentos`, `empresa-${ent.id}-documentos`, "Documentos"),
+        a(`#/empresa/${ent.id}/proveedores`, `empresa-${ent.id}-proveedores`, "Proveedores"),
+        a(`#/empresa/${ent.id}/tarjetas`, `empresa-${ent.id}-tarjetas`, "Tarjetas"),
+        a(`#/empresa/${ent.id}/contador`, `empresa-${ent.id}-contador`, "Para el contador")),
+      h("div", { class: "navgroup" }, h("span", { class: "label" }, "Negocios"),
+        state.businesses.filter((b) => b.entity_id === ent.id).map((b) => a("#/negocio/" + b.id, "negocio-" + b.id, b.name)),
+        h("a", { href: "#/nuevo-negocio", class: "add only-admin" }, "+ Agregar negocio"),
+        a("#/plataformas", "plataformas", "Plataformas"))
+    ] : [
+      h("div", { class: "navgroup" }, a("#/", "inicio", "Elegir empresa")),
+      h("div", { class: "navgroup" }, h("span", { class: "label" }, "Empresas"), state.entities.map((e) => a("#/empresa/" + e.id, "empresa-" + e.id + "-inicio", e.name))),
+      h("div", { class: "navgroup" }, a("#/plataformas", "plataformas", "Plataformas"))
+    ],
+    h("div", { class: "navgroup" }, a("#/ajustes", "ajustes", "Accesos y ajustes")),
     h("div", { class: "who" }, h("b", null, state.user.name || "Mi cuenta"), h("span", null, state.user.email), h("span", null, ROLE_LABEL[state.user.role] || ""),
       h("button", { type: "button", onclick: async () => { await api("/auth/logout", { method: "POST" }); state.user = null; renderLogin(); } }, "Cerrar sesión")));
   nav.addEventListener("click", (e) => { if (e.target.tagName === "A") nav.classList.remove("open"); });
@@ -252,16 +264,40 @@ async function uploadInvoiceDialog(businessId, supplierId, suppliers, businesses
 
 // ---------- páginas ----------
 async function pageHome() {
+  setEntity(null);
   shell(loading(), "inicio");
   const d = await api("/dashboard");
-  state.businesses = d.businesses; state.entities = d.entities;
+  state.businesses = d.all_businesses; state.entities = d.entities;
   const hour = Number(new Date().toLocaleString("en-US", { hour: "numeric", hour12: false, timeZone: "America/Chicago" }));
   const hello = hour < 12 ? "Buenos días" : hour < 19 ? "Buenas tardes" : "Buenas noches";
   const today = new Date().toLocaleDateString("es-US", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "America/Chicago" });
   const pct = Math.min(100, (d.usage.bytes / d.usage.free) * 100);
+  const orphans = d.all_businesses.filter((b) => !b.entity_id);
   const page = h("div", { class: "page" },
     h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, today), h("h1", null, `${hello}${state.user.name && state.user.name !== "Administrador" ? ", " + state.user.name : ""}`)), searchBox()),
-    h("section", { class: "stack", "aria-labelledby": "t-neg" }, h("h2", { id: "t-neg" }, "Mis negocios"),
+    h("section", { class: "stack" }, h("h2", null, "¿En qué empresa vas a trabajar?"),
+      h("div", { class: "grid g2" }, d.entities.map((e) => {
+        const sm = e.summary || {}; const biz = d.all_businesses.filter((b) => b.entity_id === e.id);
+        return h("a", { class: "card entcard", href: "#/empresa/" + e.id },
+          h("span", { class: "row between" }, h("span", { class: "stack", style: "gap:2px" }, h("b", { style: "font-size:22px" }, e.name), h("span", { class: "small muted" }, e.country)), h("span", { class: "entgo", "aria-hidden": "true" }, "→")),
+          h("span", { class: "chips" }, biz.length ? biz.map((b) => h("span", { class: "chip" }, b.name)) : h("span", { class: "small muted" }, "Sin negocios todavía")),
+          h("span", { class: "row", style: "gap:8px" }, sm.overdue ? pill(`${sm.overdue} vencido${sm.overdue === 1 ? "" : "s"}`, "bad") : "", sm.upcoming ? pill(`${sm.upcoming} fecha${sm.upcoming === 1 ? "" : "s"} próxima${sm.upcoming === 1 ? "" : "s"}`, "warn") : pill("Al día", "ok"), e.issues ? pill(`${e.issues} documento${e.issues === 1 ? "" : "s"} por revisar`, "warn") : ""));
+      }))),
+    orphans.length ? h("section", { class: "card stack" }, h("h2", null, "Negocios sin empresa asignada"), h("p", { class: "small muted", style: "margin:0" }, "Asígnales una empresa para que aparezcan dentro de ella."),
+      h("div", { class: "list" }, orphans.map((b) => h("div", null, h("b", null, b.name), h("span", { class: "row", style: "gap:8px" }, h("a", { href: "#/negocio/" + b.id }, "Abrir"), h("button", { class: "linkbtn only-admin", type: "button", onclick: () => businessDialog(b) }, "Asignar empresa")))))) : "",
+    h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Almacenamiento"), h("span", { class: "small muted mono" }, `${bytes(d.usage.bytes)} de ${bytes(d.usage.free)} gratis · ${d.usage.n} archivos`)),
+      h("div", { class: "meter", role: "img", "aria-label": `Usado ${pct.toFixed(1)}%` }, h("i", { style: `width:${Math.max(pct, 0.5)}%` }))));
+  shell(page, "inicio");
+}
+async function companyHome(ent) {
+  const d = await api("/dashboard?entity=" + ent.id);
+  state.businesses = d.all_businesses; state.entities = d.entities;
+  const hour = Number(new Date().toLocaleString("en-US", { hour: "numeric", hour12: false, timeZone: "America/Chicago" }));
+  const hello = hour < 12 ? "Buenos días" : hour < 19 ? "Buenas tardes" : "Buenas noches";
+  const today = new Date().toLocaleDateString("es-US", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "America/Chicago" });
+  const pct = Math.min(100, (d.usage.bytes / d.usage.free) * 100);
+  const page = h("div", { class: "stack", style: "gap:22px" },
+    h("section", { class: "stack", "aria-labelledby": "t-neg" }, h("div", { class: "row between" }, h("h2", { id: "t-neg" }, "Negocios de " + ent.name), h("button", { class: "btn sm only-admin", type: "button", onclick: () => businessDialog(null) }, "+ Agregar negocio")),
       h("div", { class: "grid g3" }, d.businesses.map((b) => {
         const st = STATUS_BIZ[b.status] || STATUS_BIZ.activo;
         return h("a", { class: "card bizcard", href: "#/negocio/" + b.id },
@@ -271,10 +307,12 @@ async function pageHome() {
           h("span", { class: "small", style: "color:var(--accent);font-weight:700" }, `Abrir ${b.name} →`));
       }))),
     h("section", { class: "card stack", "aria-labelledby": "t-pla" },
-      h("div", { class: "row between" }, h("div", null, h("h2", { id: "t-pla" }, "Todas mis plataformas"), h("span", { class: "small muted" }, "Cada marketplace, a qué negocio pertenece y su estado")), h("a", { href: "#/plataformas", style: "font-weight:700" }, "Ver todas →")),
+      h("div", { class: "row between" }, h("div", null, h("h2", { id: "t-pla" }, "Plataformas"), h("span", { class: "small muted" }, "Las de " + ent.name + " y las que aún no tienen negocio")), h("a", { href: "#/plataformas", style: "font-weight:700" }, "Ver todas →")),
       h("div", { class: "grid g4" }, d.platforms.slice(0, 8).map((p) => { const st = PLAT_ST[p.status]; return h("a", { href: "#/plataformas", class: "filerow", style: "flex-direction:column;align-items:flex-start;gap:2px;color:var(--ink)" }, h("b", null, p.name), h("span", { class: "small muted" }, p.business_id ? (d.businesses.find((b) => b.id === p.business_id) || {}).name || "" : p.region), pill(st[0], st[1])); }))),
     h("div", { class: "grid g2" },
-      h("section", { class: "card", "aria-labelledby": "t-emp" }, h("h2", { id: "t-emp" }, "Documentos de las empresas"),
+      h("section", { class: "card", "aria-labelledby": "t-emp" }, h("h2", { id: "t-emp" }, "Accesos rápidos"),
+        h("div", { class: "list" }, [["documentos", "Documentos", "Legales, fiscales, bancarios y declaraciones"], ["proveedores", "Proveedores", "Todos los de la empresa, por plataforma"], ["tarjetas", "Tarjetas", "Tarjetas y estados de cuenta"], ["contador", "Para el contador", "Excel y ZIP por mes, trimestre o año"]].map(([k, t, dsc]) => h("a", { href: `#/empresa/${ent.id}/${k}` }, h("span", { class: "stack", style: "gap:0" }, h("b", null, t), h("span", { class: "small muted" }, dsc)), "→")))),
+      false && h("section", null,
         h("div", { class: "list" }, d.entities.map((e) => h("a", { href: "#/empresa/" + e.id }, h("span", { class: "stack", style: "gap:0" }, h("b", null, e.name), h("span", { class: "small muted" }, `${e.country} · ${e.docs} documento${e.docs === 1 ? "" : "s"}`)), e.issues ? pill(`${e.issues} por revisar`, "warn") : pill(e.docs ? "Al día" : "Sin documentos", e.docs ? "ok" : ""))))),
       h("section", { class: "card", "aria-labelledby": "t-ven" },
         h("div", { class: "row between", style: "margin-bottom:8px" }, h("h2", { id: "t-ven" }, "Próximos vencimientos"), h("button", { class: "linkbtn only-admin", type: "button", onclick: addDeadline }, "+ Agregar fecha")),
@@ -290,10 +328,8 @@ async function pageHome() {
         h("thead", null, h("tr", null, h("th", null, "Archivo"), h("th", null, "Dónde"), h("th", null, "Fecha del documento"), h("th", null, "Estado"))),
         h("tbody", null, d.recent.map((r) => h("tr", null, h("td", null, h("a", { href: "#/factura/" + r.id, style: "font-weight:700" }, r.invoice_number ? "Factura " + r.invoice_number : r.title || "Factura sin leer")),
           h("td", null, [r.business, r.supplier].filter(Boolean).join(" › ")), h("td", { class: "mono" }, fdate(r.issue_date)),
-          h("td", null, r.status === "confirmada" ? pill("Confirmada", "ok") : pill("Por revisar", "warn"))))))) : h("p", { class: "empty" }, "Todavía no has subido facturas. Entra a un negocio y usa “Subir factura o escaneo”.")),
-    h("section", { class: "card stack", "aria-labelledby": "t-alm" }, h("div", { class: "row between" }, h("h2", { id: "t-alm" }, "Almacenamiento"), h("span", { class: "small muted mono" }, `${bytes(d.usage.bytes)} de ${bytes(d.usage.free)} gratis · ${d.usage.n} archivos`)),
-      h("div", { class: "meter", role: "img", "aria-label": `Usado ${pct.toFixed(1)}%` }, h("i", { style: `width:${Math.max(pct, 0.5)}%` }))));
-  shell(page, "inicio");
+          h("td", null, r.status === "confirmada" ? pill("Confirmada", "ok") : pill("Por revisar", "warn"))))))) : h("p", { class: "empty" }, "Todavía no has subido facturas. Entra a un negocio y usa “Subir factura o escaneo”.")));
+  return page;
 }
 function addDeadline() {
   modal("Agregar fecha importante", () => h("div", { class: "stack" },
@@ -304,22 +340,24 @@ function addDeadline() {
   async (fd) => { await api("/deadlines", { method: "POST", body: Object.fromEntries(fd) }); toast("Fecha agregada."); route(); });
 }
 
-const ENT_TABS = [["documentos", "Documentos"], ["proveedores", "Proveedores"], ["tarjetas", "Tarjetas"], ["contador", "Para el contador"]];
+const ENT_TABS = [["inicio", "Inicio"], ["documentos", "Documentos"], ["proveedores", "Proveedores"], ["tarjetas", "Tarjetas"], ["contador", "Para el contador"]];
 async function pageEntity(id, tab, q) {
-  shell(loading(), "empresa-" + id);
-  tab = ENT_TABS.some((t) => t[0] === tab) ? tab : "documentos";
+  tab = ENT_TABS.some((t) => t[0] === tab) ? tab : "inicio";
+  setEntity(id);
+  const act = `empresa-${id}-${tab}`;
+  shell(loading(), act);
   const [{ entities, folders }, { docs }] = await Promise.all([api("/entities"), tab === "documentos" ? api("/docs?entity=" + id) : Promise.resolve({ docs: [] })]);
   const ent = entities.find((e) => e.id === id); if (!ent) return pageNotFound();
   const folder = folders.includes(q.get("carpeta")) ? q.get("carpeta") : folders[0];
   const inFolder = docs.filter((d) => d.folder === folder);
   const head = [
-    h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, "Empresas"), h("h1", null, ent.name)),
+    h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, "Empresa · " + ent.country), h("h1", null, ent.name)),
       tab === "documentos" ? h("button", { class: "btn primary only-upload", type: "button", onclick: () => docDialog(id, folder) }, "Subir documento") : ""),
     h("div", { class: "seg", role: "tablist", "aria-label": "Empresa" }, entities.map((e) => h("a", { href: `#/empresa/${e.id}/${tab}`, class: e.id === id ? "on" : "", role: "tab", "aria-selected": String(e.id === id) }, `${e.name} · ${e.country}`))),
     h("div", { class: "tabs", role: "tablist" }, ENT_TABS.map(([k, l]) => h("a", { href: `#/empresa/${id}/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
   if (tab !== "documentos") {
-    const content = tab === "proveedores" ? await entitySuppliers(ent, q) : tab === "tarjetas" ? await cardsView(id) : await accountantView(ent, q);
-    shell(h("div", { class: "page" }, ...head, content), "empresa-" + id);
+    const content = tab === "inicio" ? await companyHome(ent) : tab === "proveedores" ? await entitySuppliers(ent, q) : tab === "tarjetas" ? await cardsView(id) : await accountantView(ent, q);
+    shell(h("div", { class: "page" }, ...head, content), act);
     return;
   }
   const page = h("div", { class: "page" }, ...head,
@@ -345,7 +383,7 @@ async function pageEntity(id, tab, q) {
                 d.file_id ? h("button", { class: "linkbtn small only-upload", type: "button", onclick: async (e) => { e.currentTarget.textContent = "Leyendo…"; const data = await rebuildReadData({ file_id: d.file_id, filename: d.filename, mime: d.mime }); await readCompanyDoc(d.id, data); route(); } }, "Leer datos") : "", h("button", { class: "linkbtn small only-admin", type: "button", onclick: () => docEditDialog(d) }, "Editar"),
               isAdmin() ? h("button", { class: "linkbtn small", type: "button", style: "color:var(--bad)", onclick: () => confirmDelete("Eliminar documento", `Se borra “${d.title}” con todas sus versiones (${d.versions}). No se puede deshacer.`, async () => { await api("/docs/" + d.id, { method: "DELETE" }); toast("Documento eliminado."); route(); }) }, "Eliminar") : "")))))))) :
           h("p", { class: "empty" }, "No hay documentos en esta carpeta. Usa “Subir documento”."))));
-  shell(page, "empresa-" + id);
+  shell(page, act);
 }
 const PSTATE = { pendiente: ["Pendiente", "warn"], vencida: ["Vencida", "bad"], presentada: ["Presentada", "ok"], pagada: ["Pagada", "ok"], no_aplica: ["No aplica", ""] };
 async function taxSection(entityId) {
@@ -456,6 +494,9 @@ function docEditDialog(d) {
 async function pageBusiness(id, tab, q) {
   shell(loading(), "negocio-" + id);
   const [{ business: b, platforms, stats }, { suppliers }] = await Promise.all([api("/businesses/" + id), api("/suppliers?business=" + id)]);
+  if (b.entity_id) setEntity(b.entity_id);
+  const platNames = platforms.map((p) => p.name);
+  const mySuppliers = suppliers.filter((s) => s.business_id === b.id || s.invoices > 0 || s.platforms.some((p) => platNames.includes(p)));
   const tabs = [["resumen", "Resumen"], ...(b.kind === "reventa" ? [["escaneo", "Hoja de escaneo"], ["lotes", "Lotes"], ["inventario", "Inventario"], ["casos", "Casos de Amazon"], ["aprobaciones", "Aprobaciones de marca"]] : []), ["herramientas", "Herramientas"], ["proveedores", "Proveedores"], ["archivo", "Facturas y documentos"]];
   tab = tabs.some((t) => t[0] === tab) ? tab : "resumen";
   const st = STATUS_BIZ[b.status] || STATUS_BIZ.activo;
@@ -472,7 +513,7 @@ async function pageBusiness(id, tab, q) {
         h("div", { class: "card stat" }, h("span", { class: "small muted" }, "Facturas archivadas"), h("br"), h("b", null, stats.n)),
         h("div", { class: "card stat" }, h("span", { class: "small muted" }, "Total facturado (compras)"), h("br"), h("b", null, money(stats.total))),
         h("div", { class: "card stat" }, h("span", { class: "small muted" }, "Por revisar"), h("br"), h("b", null, stats.pending || 0)),
-        h("div", { class: "card stat" }, h("span", { class: "small muted" }, "Proveedores"), h("br"), h("b", null, suppliers.length))),
+        h("div", { class: "card stat" }, h("span", { class: "small muted" }, "Proveedores"), h("br"), h("b", null, mySuppliers.length))),
       b.kind === "reventa" ? await capitalCard(b) : "",
       h("section", { class: "card" }, h("h2", null, "Plataformas de este negocio"),
         platforms.length ? h("div", { class: "list" }, platforms.map((p) => h("a", { href: "#/plataformas" }, h("b", null, p.name), pill(...PLAT_ST[p.status])))) : h("p", { class: "empty" }, "Ninguna plataforma asignada. Asígnalas en Plataformas.")),
@@ -483,9 +524,8 @@ async function pageBusiness(id, tab, q) {
     else if (tool) content.append(await recordsTool(b, tool));
     else content.append(await toolLinks(b), h("section", { class: "card" }, h("h2", null, "Herramientas de la intranet"), toolGrid(b)));
   } else if (tab === "proveedores") {
-    const names = platforms.map((p) => p.name);
-    const mine = suppliers.filter((s) => s.business_id === b.id || s.invoices > 0 || s.platforms.some((p) => names.includes(p)));
-    content.append(suppliersList(b, mine, q, { note: h("span", { class: "small muted" }, "Solo los que surten ", names.join(" o ") || b.name, ". Todos los de la empresa están en ", h("a", { href: `#/empresa/${b.entity_id || "llc"}/proveedores` }, (b.entity_name || "la empresa") + " › Proveedores"), ".") }));
+    const names = platNames;
+    content.append(suppliersList(b, mySuppliers, q, { note: h("span", { class: "small muted" }, "Solo los que surten ", names.join(" o ") || b.name, ". Todos los de la empresa están en ", h("a", { href: `#/empresa/${b.entity_id || "llc"}/proveedores` }, (b.entity_name || "la empresa") + " › Proveedores"), ".") }));
   } else if (tab === "escaneo") {
     content.append(await scanView(b));
   } else if (tab === "lotes") {
@@ -535,7 +575,7 @@ function toolGrid(b) {
 function businessDialog(b) {
   modal(b ? "Editar " + b.name : "Agregar negocio", () => h("div", { class: "stack" },
     fld("Nombre", h("input", { name: "name", value: b?.name || "", required: true })),
-    fld("Empresa a la que pertenece", h("select", { name: "entity_id" }, h("option", { value: "" }, "Sin empresa"), state.entities.map((e) => h("option", { value: e.id, selected: b?.entity_id === e.id }, e.name)))),
+    fld("Empresa a la que pertenece", h("select", { name: "entity_id" }, h("option", { value: "" }, "Sin empresa"), state.entities.map((e) => h("option", { value: e.id, selected: (b ? b.entity_id : state.entity) === e.id }, e.name)))),
     b ? fld("Estado", h("select", { name: "status" }, Object.entries(STATUS_BIZ).map(([k, v]) => h("option", { value: k, selected: b.status === k }, v[0])))) :
       fld("Tipo de negocio", h("select", { name: "kind" }, h("option", { value: "reventa" }, "Reventa en un marketplace (Amazon, Walmart, eBay…)"), h("option", { value: "tienda" }, "Tienda propia (Shopify, WooCommerce…)"), h("option", { value: "general" }, "Otro tipo de ecommerce"))),
     fld("Descripción corta", h("input", { name: "description", value: b?.description || "" }))),
@@ -1081,7 +1121,8 @@ async function inventoryView(b) {
         : h("p", { class: "empty" }, "Todavía no hay productos. Aparecen cuando confirmas facturas con sus productos y cantidades.")));
 }
 async function pageSupplier(scope, ownerId, sid, q) {
-  const active = (scope === "entity" ? "empresa-" : "negocio-") + ownerId;
+  const active = scope === "entity" ? `empresa-${ownerId}-proveedores` : "negocio-" + ownerId;
+  if (scope === "entity") setEntity(ownerId);
   shell(loading(), active);
   let b, ctx, suppliers;
   if (scope === "entity") {
@@ -1323,7 +1364,7 @@ async function pagePlatforms() {
 }
 
 function createShortcut(p) {
-  const defEntity = p.id === "mercadolibre" ? "sas" : "llc";
+  const defEntity = state.entity || (p.id === "mercadolibre" ? "sas" : "llc");
   modal(`Crear acceso a ${p.name} en Negocios`, () => h("div", { class: "stack" },
     h("p", { class: "muted", style: "margin:0" }, `Se crea el negocio “${p.name}” en el menú, con sus herramientas, sus proveedores y su archivo de facturas por año, mes y día.`),
     fld("Empresa a la que pertenece", h("select", { name: "entity_id" }, state.entities.map((e) => h("option", { value: e.id, selected: e.id === defEntity }, e.name)), h("option", { value: "" }, "Sin empresa")))),
@@ -1339,7 +1380,7 @@ async function pageSearch(qs) {
   const total = r.invoices.length + r.docs.length + r.suppliers.length;
   const page = h("div", { class: "page" }, h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, "Búsqueda"), h("h1", null, `${total} resultado${total === 1 ? "" : "s"} para “${qs}”`)), searchBox(qs)),
     r.invoices.length ? h("section", { class: "card" }, h("h2", null, "Facturas"), h("div", { class: "list" }, r.invoices.map((i) => h("a", { href: "#/factura/" + i.id }, h("span", null, h("b", null, [i.supplier, i.invoice_number ? "Factura " + i.invoice_number : i.title].filter(Boolean).join(" · ") || "Factura"), h("span", { class: "muted" }, " · " + i.business)), h("span", { class: "mono small" }, fdate(i.issue_date) + " · " + money(i.total, i.currency)))))) : "",
-    r.docs.length ? h("section", { class: "card" }, h("h2", null, "Documentos de las empresas"), h("div", { class: "list" }, r.docs.map((d) => h("a", { href: `#/empresa/${d.entity_id}?carpeta=${encodeURIComponent(d.folder)}` }, h("b", null, d.title), h("span", { class: "small muted" }, d.entity_id.toUpperCase() + " · " + d.folder))))) : "",
+    r.docs.length ? h("section", { class: "card" }, h("h2", null, "Documentos de las empresas"), h("div", { class: "list" }, r.docs.map((d) => h("a", { href: `#/empresa/${d.entity_id}/documentos?carpeta=${encodeURIComponent(d.folder)}` }, h("b", null, d.title), h("span", { class: "small muted" }, d.entity_id.toUpperCase() + " · " + d.folder))))) : "",
     r.suppliers.length ? h("section", { class: "card" }, h("h2", null, "Proveedores"), h("div", { class: "list" }, r.suppliers.map((s) => h("a", { href: `#/negocio/${s.business_id}/proveedor/${s.id}` }, h("b", null, s.name), h("span", { class: "small muted" }, s.kind || ""))))) : "",
     total ? "" : h("p", { class: "empty" }, "No encontré nada. Prueba con el número de factura, un monto, un UPC o el nombre del proveedor."));
   shell(page, "");
@@ -1408,6 +1449,7 @@ async function boot() {
     document.body.dataset.role = user.role;
     const [{ businesses }, { entities }] = await Promise.all([api("/businesses"), api("/entities")]);
     state.businesses = businesses; state.entities = entities;
+    try { const e = localStorage.getItem("empresa"); if (e && entities.some((x) => x.id === e)) state.entity = e; } catch { /* sin almacenamiento */ }
     route();
   } catch { /* la pantalla de acceso ya se mostró */ }
 }
