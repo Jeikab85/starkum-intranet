@@ -77,6 +77,7 @@ async function ensureSchema(env) {
   await backfillSuppliers(env);
   await seedTools(env);
   await backfillStatements(env);
+  await seedBrand(env);
   schemaReady = true;
 }
 async function seed(env) {
@@ -288,6 +289,23 @@ async function statementDocFor(env, cycleId) {
   const meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
   await env.DB.prepare("INSERT INTO company_docs (id, group_id, entity_id, folder, title, issued_on, file_id, card_id, version, created_at) VALUES (?,?,?,'Bancarios',?,?,?,?,1,?)")
     .bind(uid(), uid(), ent, `Estado de cuenta ${bankKey(c.issuer) || c.nickname} · ${meses[Number(mo) - 1]} ${y}`, c.closing_date, c.file_id, c.card_id, now()).run();
+}
+// Sitio web de cada empresa y logo de Starkum Group (tomado de starkumgroup.com), una sola vez
+const SAS_LOGO_URL = "https://horizons-cdn.hostinger.com/ace7513c-a775-491e-b986-8fbe3730a3d9/bae946874a2112a2b13a4fb10aadfcd2.png";
+async function seedBrand(env) {
+  if (await env.DB.prepare("SELECT value FROM settings WHERE key = 'brand_v1'").first()) return;
+  for (const [id, web] of [["llc", "https://starkumholdings.com"], ["sas", "https://starkumgroup.com"]]) {
+    const e = await env.DB.prepare("SELECT details FROM entities WHERE id = ?").bind(id).first();
+    if (!e) continue;
+    const d = JSON.parse(e.details || "{}");
+    if (!d["Sitio web"]) { d["Sitio web"] = web; await env.DB.prepare("UPDATE entities SET details = ? WHERE id = ?").bind(JSON.stringify(d), id).run(); }
+  }
+  try {
+    const r = await fetch(SAS_LOGO_URL);
+    const type = r.headers.get("content-type") || "";
+    if (r.ok && type.startsWith("image/")) await env.FILES.put("brand/entity-sas", await r.arrayBuffer(), { httpMetadata: { contentType: type } });
+  } catch { /* sin conexión: queda el ícono por defecto */ }
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('brand_v1', ?)").bind(now()).run();
 }
 async function backfillStatements(env) {
   if (await env.DB.prepare("SELECT value FROM settings WHERE key = 'link_statements_v1'").first()) return;

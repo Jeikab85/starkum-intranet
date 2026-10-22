@@ -45,6 +45,14 @@ function entityLogo(e, size = 72) {
   box.append(img);
   return box;
 }
+// Enlace al sitio web de la empresa (dato "Sitio web" de la empresa)
+function entityWeb(e, style = "") {
+  const raw = String(e?.details?.["Sitio web"] || "").trim();
+  if (!raw) return "";
+  const href = /^https?:/i.test(raw) ? raw : "https://" + raw;
+  let host = raw; try { host = new URL(href).hostname.replace(/^www\./, ""); } catch { /* texto tal cual */ }
+  return h("a", { href, target: "_blank", rel: "noopener", class: "weblink", style }, host, " ↗");
+}
 function pill(label, cls) { return h("span", { class: "pill " + (cls || "") }, label); }
 function toast(msg, err) {
   const t = h("div", { class: "toast" + (err ? " err" : ""), role: "status" }, msg);
@@ -278,8 +286,9 @@ async function pageHome() {
   state.entities = entities.map((e) => ({ ...e, ...(state.entities.find((x) => x.id === e.id) || {}), details: e.details }));
   const page = h("div", { class: "page chooser" },
     h("div", { class: "chooserhead" }, logo("", 64), h("h1", null, "¿En qué empresa vas a trabajar?")),
-    h("div", { class: "entpick" }, entities.map((e) => h("a", { class: "entcard", href: "#/empresa/" + e.id },
-      entityLogo(e, 96), h("span", { class: "stack", style: "gap:4px;align-items:center;text-align:center" }, h("b", { style: "font-size:22px" }, e.name), h("span", { class: "muted" }, e.country))))));
+    h("div", { class: "entpick" }, entities.map((e) => h("div", { class: "entwrap" }, h("a", { class: "entcard", href: "#/empresa/" + e.id },
+      entityLogo(e, 96), h("span", { class: "stack", style: "gap:4px;align-items:center;text-align:center" }, h("b", { style: "font-size:22px" }, e.name), h("span", { class: "muted" }, e.country))),
+      entityWeb(e)))));
   shell(page, "inicio");
 }
 async function companyHome(ent) {
@@ -344,7 +353,7 @@ async function pageEntity(id, tab, q) {
   const folder = folders.includes(q.get("carpeta")) ? q.get("carpeta") : folders[0];
   const inFolder = docs.filter((d) => d.folder === folder);
   const head = [
-    h("div", { class: "head" }, h("div", { class: "row", style: "gap:14px;align-items:center;flex-wrap:nowrap;min-width:0" }, entityLogo(ent, 56), h("div", { style: "min-width:0" }, h("span", { class: "eyebrow" }, "Empresa · " + ent.country), h("h1", null, ent.name))),
+    h("div", { class: "head" }, h("div", { class: "row", style: "gap:14px;align-items:center;flex-wrap:nowrap;min-width:0" }, entityLogo(ent, 56), h("div", { style: "min-width:0" }, h("span", { class: "eyebrow" }, "Empresa · " + ent.country), h("h1", null, ent.name), entityWeb(ent, "font-size:14px"))),
       tab === "inicio" ? searchBox() : "",
       tab === "documentos" ? h("button", { class: "btn primary only-upload", type: "button", onclick: () => docDialog(id, folder) }, "Subir documento") : ""),
     h("div", { class: "tabs", role: "tablist" }, ENT_TABS.map(([k, l]) => h("a", { href: `#/empresa/${id}/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
