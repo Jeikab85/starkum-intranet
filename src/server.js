@@ -207,6 +207,12 @@ const SUGGESTED_TOOLS = [
   ["A2X", "https://www.a2xaccounting.com", "Pasa las liquidaciones de Amazon (y Walmart) a la contabilidad. Opcional por ahora."],
 ];
 async function seedTools(env) {
+  if (!(await env.DB.prepare("SELECT value FROM settings WHERE key = 'seed_zoho_v1'").first())) {
+    const ex = await env.DB.prepare("SELECT id FROM subscriptions WHERE entity_id = 'llc' AND lower(name) LIKE '%zoho%'").first();
+    const q = [env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('seed_zoho_v1', ?)").bind(now())];
+    if (!ex) q.unshift(env.DB.prepare("INSERT INTO subscriptions (id, entity_id, business_id, platform_ids, name, url, amount, currency, cycle, charge_date, use_kind, notes, created_at) VALUES (?,'llc',NULL,'[]','Zoho Mail','https://mail.zoho.com/zm/#mail/folder/inbox',0,'USD','mensual','','empresa',?,?)").bind(uid(), "Bandeja de entrada del correo de Starkum. Si usas el plan gratis de Zoho, cambia el tipo a Gratis.", now()));
+    await env.DB.batch(q);
+  }
   if (await env.DB.prepare("SELECT value FROM settings WHERE key = 'seed_tools_v3'").first()) return;
   const plats = (await env.DB.prepare("SELECT p.id, p.name, p.business_id, b.entity_id FROM platforms p LEFT JOIN businesses b ON b.id = p.business_id").all()).results;
   const amazon = plats.find((x) => x.id === "amazon-us") || plats.find((x) => /amazon/i.test(x.name));
@@ -1113,8 +1119,9 @@ async function api(req, env, url, user) {
 
   // Suscripciones (por plataforma o generales de la empresa)
   if (p === "/subs" && m === "GET") {
-    const ent = url.searchParams.get("entity"); const biz = url.searchParams.get("business");
-    const rows = (await env.DB.prepare(`SELECT s.*, c.nickname AS card, c.last4, c.card_type FROM subscriptions s LEFT JOIN cards c ON c.id = s.card_id WHERE ${biz ? "EXISTS (SELECT 1 FROM json_each(s.platform_ids) j JOIN platforms p ON p.id = j.value WHERE p.business_id = ?)" : "s.entity_id = ?"} ORDER BY s.ended_on IS NOT NULL, s.name`).bind(biz || ent).all()).results;
+    const ent = url.searchParams.get("entity"); const biz = url.searchParams.get("business"); const withGeneral = url.searchParams.get("general") === "1";
+    const bizEnt = biz && withGeneral ? (await env.DB.prepare("SELECT entity_id FROM businesses WHERE id = ?").bind(biz).first())?.entity_id || "" : "";
+    const rows = (await env.DB.prepare(`SELECT s.*, c.nickname AS card, c.last4, c.card_type FROM subscriptions s LEFT JOIN cards c ON c.id = s.card_id WHERE ${biz ? "(EXISTS (SELECT 1 FROM json_each(s.platform_ids) j JOIN platforms p ON p.id = j.value WHERE p.business_id = ?) OR (s.entity_id = ? AND s.platform_ids = '[]'))" : "s.entity_id = ?"} ORDER BY s.ended_on IS NOT NULL, s.name`).bind(...(biz ? [biz, bizEnt] : [ent])).all()).results;
     const names = await platNames(env);
     const today = new Date().toISOString().slice(0, 10);
     return json({ subs: rows.map((s) => subOut(s, names, today)) });

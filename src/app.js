@@ -541,9 +541,9 @@ async function pageBusiness(id, tab, q) {
   shell(page, "negocio-" + id);
 }
 async function toolLinks(b) {
-  const [{ tools: own }, { subs }] = await Promise.all([api("/tools?business=" + b.id), api("/subs?business=" + b.id).catch(() => ({ subs: [] }))]);
+  const [{ tools: own }, { subs }] = await Promise.all([api("/tools?business=" + b.id), api("/subs?general=1&business=" + b.id).catch(() => ({ subs: [] }))]);
   const key = (n) => String(n || "").toLowerCase().replace(/\W/g, "");
-  const tools = [...own, ...subs.filter((x) => x.url && x.active && !own.some((t) => key(t.name) === key(x.name))).map((x) => ({ name: x.name, url: x.url, description: x.notes, sub: true }))];
+  const tools = [...own, ...subs.filter((x) => x.url && x.active && !own.some((t) => key(t.name) === key(x.name))).map((x) => ({ name: x.name, url: x.url, description: x.notes, sub: true, general: !x.platform_ids.length }))];
   const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; } };
   const dlg = (t) => modal(t ? "Editar " + t.name : "Agregar herramienta", () => h("div", { class: "stack" },
     fld("Nombre", h("input", { name: "name", required: true, value: t?.name || "", placeholder: "Por ejemplo: SellerAmp" })),
@@ -563,7 +563,7 @@ async function toolLinks(b) {
       h("button", { class: "btn sm only-admin", type: "button", onclick: () => dlg() }, "+ Agregar")),
     tools.length ? h("div", { class: "toolgrid" }, tools.map((t) => h("div", { class: "toolwrap" },
       h("a", { class: "tooltile", href: t.url, target: "_blank", rel: "noopener", title: t.description || t.name }, h("span", { class: "toolimg" }, icon(t)), h("b", null, t.name)),
-      t.sub ? h("a", { class: "tooledit only-admin", href: `#/negocio/${b.id}/suscripciones`, "aria-label": "Ver " + t.name + " en Suscripciones", title: "Se edita en Suscripciones" }, "✎") : h("button", { class: "tooledit only-admin", type: "button", "aria-label": "Editar " + t.name, onclick: () => dlg(t) }, "✎"))))
+      t.sub ? h("a", { class: "tooledit only-admin", href: t.general ? `#/empresa/${b.entity_id}/suscripciones` : `#/negocio/${b.id}/suscripciones`, "aria-label": "Ver " + t.name + " en Suscripciones", title: "Se edita en Suscripciones" }, "✎") : h("button", { class: "tooledit only-admin", type: "button", "aria-label": "Editar " + t.name, onclick: () => dlg(t) }, "✎"))))
       : h("p", { class: "empty" }, "Agrega los enlaces de las herramientas que usas."));
 }
 function toolGrid(b) {
