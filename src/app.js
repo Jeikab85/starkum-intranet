@@ -100,7 +100,7 @@ function shell(content, active) {
     h("div", { class: "navgroup" }, h("span", { class: "label" }, "Negocios"),
       state.businesses.map((b) => h("a", { href: "#/negocio/" + b.id, class: active === "negocio-" + b.id ? "on" : "" }, b.name)),
       h("a", { href: "#/nuevo-negocio", class: "add only-admin" }, "+ Agregar negocio")),
-    h("div", { class: "navgroup" }, h("a", { href: "#/tarjetas", class: active === "tarjetas" ? "on" : "" }, "Tarjetas"), h("a", { href: "#/ajustes", class: active === "ajustes" ? "on" : "" }, "Accesos y ajustes")),
+    h("div", { class: "navgroup" }, h("a", { href: "#/ajustes", class: active === "ajustes" ? "on" : "" }, "Accesos y ajustes")),
     h("div", { class: "who" }, h("b", null, state.user.name || "Mi cuenta"), h("span", null, state.user.email), h("span", null, ROLE_LABEL[state.user.role] || ""),
       h("button", { type: "button", onclick: async () => { await api("/auth/logout", { method: "POST" }); state.user = null; renderLogin(); } }, "Cerrar sesión")));
   nav.addEventListener("click", (e) => { if (e.target.tagName === "A") nav.classList.remove("open"); });
@@ -217,10 +217,13 @@ function fileActions(fileId, onSend) {
 }
 
 // ---------- subida de facturas ----------
-async function uploadInvoiceDialog(businessId, supplierId, suppliers) {
+async function uploadInvoiceDialog(businessId, supplierId, suppliers, businesses) {
+  const chooser = !businessId && businesses?.length ? businesses : null;
+  if (!businessId) businessId = chooser ? chooser[0].id : "amazon";
   const [{ cards }, lotsRes] = await Promise.all([api("/cards"), api("/lots?business=" + businessId).catch(() => ({ lots: [] }))]);
   const openLots = (lotsRes.lots || []).filter((l) => ["comprado", "etiquetado"].includes(l.stage));
   modal("Subir factura o escaneo", () => h("div", { class: "stack" },
+    chooser ? fld("Negocio", h("select", { name: "business_id" }, chooser.map((x) => h("option", { value: x.id }, x.name)))) : "",
     fld("Archivo (foto o PDF)", h("input", { name: "file", type: "file", accept: "image/*,application/pdf", required: true })),
     fld("Proveedor", h("select", { name: "supplier_id" }, h("option", { value: "" }, "Sin proveedor / lo elijo después"),
       (suppliers || []).map((s) => h("option", { value: s.id, selected: s.id === supplierId }, s.name)))),
@@ -234,6 +237,7 @@ async function uploadInvoiceDialog(businessId, supplierId, suppliers) {
     const prep = await prepareUpload(f);
     const up = new FormData();
     up.append("file", prep.file); up.append("original_size", prep.originalSize);
+    if (chooser) businessId = fd.get("business_id") || businessId;
     up.append("business_id", businessId); up.append("supplier_id", fd.get("supplier_id")); up.append("kind", fd.get("kind"));
     up.append("card_id", fd.get("card_id") || "");
     let lot = fd.get("lot_id") || "";
@@ -300,16 +304,25 @@ function addDeadline() {
   async (fd) => { await api("/deadlines", { method: "POST", body: Object.fromEntries(fd) }); toast("Fecha agregada."); route(); });
 }
 
-async function pageEntity(id, folderSel) {
+const ENT_TABS = [["documentos", "Documentos"], ["proveedores", "Proveedores"], ["tarjetas", "Tarjetas"], ["contador", "Para el contador"]];
+async function pageEntity(id, tab, q) {
   shell(loading(), "empresa-" + id);
-  const [{ entities, folders }, { docs }] = await Promise.all([api("/entities"), api("/docs?entity=" + id)]);
+  tab = ENT_TABS.some((t) => t[0] === tab) ? tab : "documentos";
+  const [{ entities, folders }, { docs }] = await Promise.all([api("/entities"), tab === "documentos" ? api("/docs?entity=" + id) : Promise.resolve({ docs: [] })]);
   const ent = entities.find((e) => e.id === id); if (!ent) return pageNotFound();
-  const folder = folders.includes(folderSel) ? folderSel : folders[0];
+  const folder = folders.includes(q.get("carpeta")) ? q.get("carpeta") : folders[0];
   const inFolder = docs.filter((d) => d.folder === folder);
-  const page = h("div", { class: "page" },
-    h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, "Empresas › Documentos"), h("h1", null, ent.name)),
-      h("button", { class: "btn primary only-upload", type: "button", onclick: () => docDialog(id, folder) }, "Subir documento")),
-    h("div", { class: "seg", role: "tablist", "aria-label": "Empresa" }, entities.map((e) => h("a", { href: "#/empresa/" + e.id, class: e.id === id ? "on" : "", role: "tab", "aria-selected": String(e.id === id) }, `${e.name} · ${e.country}`))),
+  const head = [
+    h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, "Empresas"), h("h1", null, ent.name)),
+      tab === "documentos" ? h("button", { class: "btn primary only-upload", type: "button", onclick: () => docDialog(id, folder) }, "Subir documento") : ""),
+    h("div", { class: "seg", role: "tablist", "aria-label": "Empresa" }, entities.map((e) => h("a", { href: `#/empresa/${e.id}/${tab}`, class: e.id === id ? "on" : "", role: "tab", "aria-selected": String(e.id === id) }, `${e.name} · ${e.country}`))),
+    h("div", { class: "tabs", role: "tablist" }, ENT_TABS.map(([k, l]) => h("a", { href: `#/empresa/${id}/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
+  if (tab !== "documentos") {
+    const content = tab === "proveedores" ? await entitySuppliers(ent, q) : tab === "tarjetas" ? await cardsView(id) : await accountantView(ent, q);
+    shell(h("div", { class: "page" }, ...head, content), "empresa-" + id);
+    return;
+  }
+  const page = h("div", { class: "page" }, ...head,
     h("section", { class: "card" }, h("div", { class: "row between", style: "margin-bottom:10px" }, h("h2", null, "Datos de la empresa"), h("button", { class: "linkbtn only-admin", type: "button", onclick: () => entityDialog(ent) }, "Editar")),
       h("div", { class: "kv" }, Object.entries(ent.details).map(([k, v]) => {
         const secret = /EIN|NIT|Cuenta/i.test(k) && v;
@@ -319,7 +332,7 @@ async function pageEntity(id, folderSel) {
     await taxSection(id),
     h("div", { class: "split" },
       h("nav", { class: "card folder stack", style: "flex:1 1 220px;max-width:280px;gap:2px", "aria-label": "Carpetas" }, h("span", { class: "eyebrow", style: "padding:0 12px 6px" }, "Carpetas"),
-        folders.map((f) => h("a", { href: `#/empresa/${id}?carpeta=${encodeURIComponent(f)}`, class: f === folder ? "on" : "" }, f, h("span", null, docs.filter((d) => d.folder === f).length)))),
+        folders.map((f) => h("a", { href: `#/empresa/${id}/documentos?carpeta=${encodeURIComponent(f)}`, class: f === folder ? "on" : "" }, f, h("span", null, docs.filter((d) => d.folder === f).length)))),
       h("section", { class: "card", style: "flex:3 1 520px;min-width:0" }, h("h2", null, folder),
         inFolder.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:640px" },
           h("thead", null, h("tr", null, h("th", null, "Documento"), h("th", null, "Emitido"), h("th", null, "Vence"), h("th", null, "Estado"), h("th", null, h("span", { class: "muted" }, "Acciones")))),
@@ -443,7 +456,7 @@ function docEditDialog(d) {
 async function pageBusiness(id, tab, q) {
   shell(loading(), "negocio-" + id);
   const [{ business: b, platforms, stats }, { suppliers }] = await Promise.all([api("/businesses/" + id), api("/suppliers?business=" + id)]);
-  const tabs = [["resumen", "Resumen"], ...(b.kind === "reventa" ? [["escaneo", "Hoja de escaneo"], ["lotes", "Lotes"], ["casos", "Casos de Amazon"]] : []), ["herramientas", "Herramientas"], ["proveedores", "Proveedores"], ["archivo", "Facturas y documentos"]];
+  const tabs = [["resumen", "Resumen"], ...(b.kind === "reventa" ? [["escaneo", "Hoja de escaneo"], ["lotes", "Lotes"], ["inventario", "Inventario"], ["casos", "Casos de Amazon"], ["aprobaciones", "Aprobaciones de marca"]] : []), ["herramientas", "Herramientas"], ["proveedores", "Proveedores"], ["archivo", "Facturas y documentos"]];
   tab = tabs.some((t) => t[0] === tab) ? tab : "resumen";
   const st = STATUS_BIZ[b.status] || STATUS_BIZ.activo;
   const content = h("div", { class: "stack", style: "gap:18px" });
@@ -470,15 +483,21 @@ async function pageBusiness(id, tab, q) {
     else if (tool) content.append(await recordsTool(b, tool));
     else content.append(await toolLinks(b), h("section", { class: "card" }, h("h2", null, "Herramientas de la intranet"), toolGrid(b)));
   } else if (tab === "proveedores") {
-    content.append(suppliersList(b, suppliers, q));
+    const names = platforms.map((p) => p.name);
+    const mine = suppliers.filter((s) => s.business_id === b.id || s.invoices > 0 || s.platforms.some((p) => names.includes(p)));
+    content.append(suppliersList(b, mine, q, { note: h("span", { class: "small muted" }, "Solo los que surten ", names.join(" o ") || b.name, ". Todos los de la empresa están en ", h("a", { href: `#/empresa/${b.entity_id || "llc"}/proveedores` }, (b.entity_name || "la empresa") + " › Proveedores"), ".") }));
   } else if (tab === "escaneo") {
     content.append(await scanView(b));
   } else if (tab === "lotes") {
     content.append(await lotsView(b));
+  } else if (tab === "inventario") {
+    content.append(await inventoryView(b));
+  } else if (tab === "aprobaciones") {
+    content.append(await approvalsView(b));
   } else if (tab === "casos") {
     content.append(await casesView(b, q.get("c")));
   } else {
-    content.append(await archiveView(b, suppliers, null, q));
+    content.append(await archiveView({ scope: "business", id: b.id, base: "#/negocio/" + b.id, name: b.name }, null, q));
   }
   shell(page, "negocio-" + id);
 }
@@ -562,7 +581,7 @@ async function recordsTool(b, tool) {
     records.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:560px" }, h("thead", null, h("tr", null, cols.map((c) => h("th", null, c[1])))),
       h("tbody", null, records.map((r) => h("tr", null, cols.map(([k, , t]) => h("td", { class: t !== "text" ? "mono" : "" }, t === "date" ? fdate(r.data[k]) : r.data[k] || "—"))))))) : h("p", { class: "empty" }, "Todavía no hay registros."));
 }
-function supplierDialog(b, s) {
+function supplierDialog(target, s) {
   const plats = ["Amazon US", "Walmart", "eBay", "Etsy", "TikTok Shop", "Mercado Libre", "Shopify", "WooCommerce"];
   const sp = s?.platforms || [];
   modal(s ? "Editar " + s.name : "Agregar proveedor", () => h("div", { class: "stack" },
@@ -581,32 +600,37 @@ function supplierDialog(b, s) {
     h("fieldset", null, h("legend", null, "Plataformas donde vendes lo que le compras"), h("div", { class: "chips" }, plats.map((p) => h("label", { class: "chip" }, h("input", { type: "checkbox", name: "platforms", value: p, checked: sp.includes(p) }), " " + p)))),
     fld("Notas", h("textarea", { name: "notes", rows: "2" }, s?.notes || ""))),
   async (fd) => {
-    const body = Object.fromEntries(fd); body.platforms = fd.getAll("platforms"); body.business_id = b.id;
+    const body = Object.fromEntries(fd); body.platforms = fd.getAll("platforms"); Object.assign(body, target || {});
     if (s) await api("/suppliers/" + s.id, { method: "PUT", body }); else await api("/suppliers", { method: "POST", body });
     toast("Proveedor guardado."); route();
   });
 }
 const SUP_ORDER = { listo: 0, contactado: 1, activo: 2, investigar: 3, no_enviar: 4, descartado: 5 };
-function suppliersList(b, suppliers, q) {
+function suppliersList(b, suppliers, q, ctx = {}) {
+  const base = ctx.base || `#/negocio/${b.id}`;
   const f = q?.get("f") || "activos";
   const filters = [["activos", "En juego", (s) => s.status !== "descartado"], ["borrador", "Con borrador listo", (s) => s.draft_text && !["descartado", "no_enviar"].includes(s.status)],
     ["investigar", "Por investigar", (s) => (s.status || "investigar") === "investigar"], ["contactado", "Contactados", (s) => s.status === "contactado"], ["activo", "Cuenta abierta", (s) => s.status === "activo"],
     ["no_enviar", "No contactar aún", (s) => s.status === "no_enviar"], ["descartado", "Descartados", (s) => s.status === "descartado"], ["todos", "Todos", () => true]];
+  const plat = q?.get("p") || "";
+  if (ctx.platforms && plat) suppliers = suppliers.filter((s) => s.platforms.includes(plat));
   const cur = filters.find((x) => x[0] === f) || filters[0];
   const list = suppliers.filter(cur[2]).sort((a, z) => (a.contact_order || 99) - (z.contact_order || 99) || (SUP_ORDER[a.status || "investigar"] - SUP_ORDER[z.status || "investigar"]) || a.name.localeCompare(z.name));
   const search = h("input", { type: "text", placeholder: "Buscar proveedor, marca o ciudad", "aria-label": "Buscar proveedor", style: "max-width:320px", oninput: (e) => {
     const t = e.target.value.toLowerCase(); grid.querySelectorAll("[data-k]").forEach((el) => { el.style.display = el.dataset.k.includes(t) ? "" : "none"; }); } });
-  const grid = h("div", { class: "grid g3" }, list.map((s) => h("a", { class: "card bizcard", href: `#/negocio/${b.id}/proveedor/${s.id}`, "data-k": [s.name, s.brands, s.location, s.kind].join(" ").toLowerCase() },
+  const grid = h("div", { class: "grid g3" }, list.map((s) => h("a", { class: "card bizcard", href: `${base}/proveedor/${s.id}`, "data-k": [s.name, s.brands, s.location, s.kind].join(" ").toLowerCase() },
     h("span", { class: "top" }, h("b", { style: "font-size:17px" }, s.contact_order && s.status !== "descartado" ? h("span", { class: "mono muted", title: "Orden de contacto sugerido por el Director" }, s.contact_order + ". ") : "", s.name), pill(...(SUP_ST[s.status || "investigar"]))),
-    h("span", { class: "chips" }, s.amazon_policy ? pill(...AMZ_POL[s.amazon_policy]) : "", s.risk ? pill(...RISK[s.risk]) : "", s.draft_text && s.status !== "descartado" ? pill("Borrador listo", "info") : ""),
-    h("span", { class: "small muted" }, [s.location, s.kind, s.priority ? "prioridad " + s.priority : "", s.business_id !== b.id ? "compartido desde " + s.home_business : ""].filter(Boolean).join(" · ")),
+    h("span", { class: "chips" }, s.platforms.map((p) => pill(p, "info")), s.amazon_policy ? pill(...AMZ_POL[s.amazon_policy]) : "", s.risk ? pill(...RISK[s.risk]) : "", s.draft_text && s.status !== "descartado" ? pill("Borrador listo", "info") : ""),
+    h("span", { class: "small muted" }, [s.location, s.kind, s.priority ? "prioridad " + s.priority : "", s.used_in ? "facturas en " + s.used_in.split(",").join(", ") : ""].filter(Boolean).join(" · ")),
     s.director_note && s.status !== "descartado" ? h("span", { class: "small" }, "Condición: " + s.director_note) : "",
     s.invoices ? h("span", { class: "small" }, `${s.invoices} factura${s.invoices === 1 ? "" : "s"} · ${money(s.year_total)} este año`) : "")));
   const fromCerebro = suppliers.find((s) => s.source_updated);
-  return h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, "Proveedores de " + b.name),
-      fromCerebro ? h("span", { class: "small muted" }, "Estados y fichas del Cerebro Amazon, actualizado el " + fdate(fromCerebro.source_updated)) : ""),
-    h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => supplierDialog(b) }, "+ Agregar proveedor")),
-    h("div", { class: "chips", role: "tablist" }, filters.map(([k, l, fn]) => h("a", { class: "chip" + (k === cur[0] ? " on" : ""), href: `#/negocio/${b.id}/proveedores?f=${k}`, role: "tab", "aria-selected": String(k === cur[0]) }, `${l} (${suppliers.filter(fn).length})`))),
+  const qs = (o) => "?" + new URLSearchParams(Object.entries({ f, p: plat, ...o }).filter(([, v]) => v)).toString();
+  return h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, ctx.title || "Proveedores de " + b.name),
+      ctx.note || (fromCerebro ? h("span", { class: "small muted" }, "Estados y fichas del Cerebro Amazon, actualizado el " + fdate(fromCerebro.source_updated)) : "")),
+    h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => supplierDialog(ctx.target || { business_id: b.id }) }, "+ Agregar proveedor")),
+    ctx.platforms ? h("div", { class: "chips" }, h("span", { class: "small muted", style: "align-self:center" }, "Plataforma:"), ["", ...ctx.platforms].map((pl) => h("a", { class: "chip" + (pl === plat ? " on" : ""), href: `${base}/proveedores` + qs({ p: pl }) }, pl || "Todas"))) : "",
+    h("div", { class: "chips", role: "tablist" }, filters.map(([k, l, fn]) => h("a", { class: "chip" + (k === cur[0] ? " on" : ""), href: `${base}/proveedores` + qs({ f: k }), role: "tab", "aria-selected": String(k === cur[0]) }, `${l} (${suppliers.filter(fn).length})`))),
     search, list.length ? grid : h("p", { class: "empty" }, "No hay proveedores en este filtro."));
 }
 // ---------- hoja de escaneo (Cerebro Amazon) ----------
@@ -700,9 +724,8 @@ const cardText = (c) => `${c.nickname} · ${CTYPE[c.card_type] || "Crédito"} ${
 function cardSelect(cards, selected, emptyLabel) {
   return h("select", { name: "card_id" }, h("option", { value: "" }, emptyLabel), cards.map((c) => h("option", { value: c.id, selected: c.id === selected }, cardText(c))));
 }
-async function pageCards() {
-  shell(loading(), "tarjetas");
-  const { cards } = await api("/cards");
+async function cardsView(entityId) {
+  const { cards } = await api("/cards?entity=" + entityId);
   const today = new Date().toISOString().slice(0, 10);
   const cyclesView = (c) => {
     const debit = c.card_type === "debito";
@@ -732,21 +755,21 @@ async function pageCards() {
       debit ? "" : kv("Día límite de pago", c.due_day ? "Día " + c.due_day : ""), debit ? "" : kv("Límite de crédito", c.credit_limit != null ? money(c.credit_limit) : ""),
       kv("Es de", c.owner === "empresa" ? "La empresa" : "Uso personal"), c.notes ? kv("Notas", c.notes) : "");
   };
-  const page = h("div", { class: "page" },
-    h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, "Pagos"), h("h1", null, "Tarjetas"),
-      h("p", { class: "small muted", style: "margin:4px 0 0;max-width:640px" }, "Cada factura se asocia a la tarjeta con que pagaste. La intranet guarda solo el banco, la red, el titular, los últimos 4 dígitos y el vencimiento: nunca el número completo, el código de seguridad ni la foto.")),
-      h("button", { class: "btn primary only-admin", type: "button", onclick: () => cardDialog() }, "+ Agregar tarjeta")),
+  const entName = (id) => (state.entities.find((e) => e.id === id) || {}).name;
+  return h("div", { class: "stack", style: "gap:14px" },
+    h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, "Cada factura se asocia a la tarjeta con que pagaste. Se guardan solo el banco, la red, el tipo, el titular, los últimos 4 dígitos y el vencimiento: nunca el número completo, el código de seguridad ni la foto."),
+      h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => cardDialog(null, entityId) }, "+ Agregar tarjeta")),
     cards.length ? h("div", { class: "stack", style: "gap:14px" }, cards.map((c) => h("section", { class: "card stack" },
       h("div", { class: "row between", style: "align-items:flex-start" },
         h("div", { class: "row", style: "gap:14px;align-items:center" }, h("div", { class: "cardchip" + (c.card_type === "debito" ? " debit" : ""), "aria-hidden": "true" }, h("span", null, (c.network || "Tarjeta") + " · " + (CTYPE[c.card_type] || "Crédito")), h("b", { class: "mono" }, "•••• " + c.last4)),
           h("div", { class: "stack", style: "gap:2px" }, h("b", { style: "font-size:17px" }, c.nickname),
-            h("span", { class: "small" }, `${c.uses.n} factura${c.uses.n === 1 ? "" : "s"} pagada${c.uses.n === 1 ? "" : "s"} con ella · ${money(c.uses.total)}`))),
-        h("div", { class: "row only-admin" }, h("button", { class: "btn sm", type: "button", onclick: () => cardDialog(c) }, "Editar"),
+            h("span", { class: "small" }, `${c.uses.n} factura${c.uses.n === 1 ? "" : "s"} pagada${c.uses.n === 1 ? "" : "s"} con ella · ${money(c.uses.total)}`),
+            !c.entity_id ? h("span", { class: "small muted" }, "Se usa en todas las empresas") : "")),
+        h("div", { class: "row only-admin" }, h("button", { class: "btn sm", type: "button", onclick: () => cardDialog(c, entityId) }, "Editar"),
           h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Eliminar tarjeta", `Se borra ${c.nickname} •••• ${c.last4} y sus estados de cuenta. Las facturas no se borran: quedan sin tarjeta asociada.`, async () => { await api("/cards/" + c.id, { method: "DELETE" }); toast("Tarjeta eliminada."); route(); }) }, "Eliminar"))),
-      info(c), cyclesView(c)))) : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay tarjetas. Agrega cada tarjeta con la que compras inventario.")));
-  shell(page, "tarjetas");
+      info(c), cyclesView(c)))) : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay tarjetas de esta empresa. Agrega cada tarjeta con la que compras.")));
 }
-function cardDialog(c) {
+function cardDialog(c, entityId) {
   modal(c ? "Editar " + c.nickname : "Agregar tarjeta", () => {
     const F = {};
     const inp = (k, label, attrs = {}) => { F[k] = h("input", { name: k, value: c?.[k] ?? "", ...attrs }); return fld(label, F[k]); };
@@ -775,7 +798,8 @@ function cardDialog(c) {
       h("div", { class: "fgrid" }, fld("Tipo", typeSel), inp("nickname", "Nombre corto", { required: true, placeholder: "Por ejemplo: Chase personal" }), inp("issuer", "Banco o emisor"), fld("Red", netSel)),
       h("div", { class: "fgrid" }, inp("holder", "Titular"), inp("last4", "Últimos 4 dígitos", { required: true, inputmode: "numeric", maxlength: "4", pattern: "\\d{4}" }), inp("exp_month", "Mes de vencimiento", { type: "number", min: "1", max: "12" }), inp("exp_year", "Año de vencimiento", { type: "number", min: "2024", max: "2099" })),
       creditBox, debitBox,
-      h("div", { class: "fgrid" }, fld("Es de", h("select", { name: "owner" }, [["personal", "Uso personal"], ["empresa", "La empresa"]].map(([k, l]) => h("option", { value: k, selected: (c?.owner || "personal") === k }, l)))), inp("notes", "Notas")));
+      h("div", { class: "fgrid" }, fld("Empresa donde se usa", h("select", { name: "entity_id" }, state.entities.map((e) => h("option", { value: e.id, selected: (c ? c.entity_id : entityId) === e.id }, e.name)), h("option", { value: "", selected: c && !c.entity_id }, "Todas las empresas"))),
+        fld("Es de", h("select", { name: "owner" }, [["personal", "Uso personal"], ["empresa", "La empresa"]].map(([k, l]) => h("option", { value: k, selected: (c?.owner || "personal") === k }, l)))), inp("notes", "Notas")));
   }, async (fd) => {
     const body = Object.fromEntries(fd);
     if (/\d{5,}/.test(body.last4 || "")) throw new Error("Escribe solo los últimos 4 dígitos.");
@@ -929,21 +953,160 @@ async function caseDetail(b, id) {
       h("p", { class: "small muted", style: "margin:0" }, "Por ejemplo: EIN, certificado de reventa, Articles of Organization.")),
     isAdmin() ? h("button", { class: "btn danger sm", type: "button", style: "align-self:flex-start", onclick: () => confirmDelete("Eliminar caso", "Se borra el registro del caso. Las facturas y los documentos no se tocan.", async () => { await api("/cases/" + c.id, { method: "DELETE" }); toast("Caso eliminado."); location.hash = `#/negocio/${b.id}/casos`; }) }, "Eliminar caso") : "");
 }
-async function pageSupplier(bid, sid, q) {
-  shell(loading(), "negocio-" + bid);
-  const [{ business: b }, { suppliers }] = await Promise.all([api("/businesses/" + bid), api("/suppliers?business=" + bid)]);
+async function entitySuppliers(ent, q) {
+  const [{ suppliers }, { platforms }] = await Promise.all([api("/suppliers?entity=" + ent.id), api("/platforms").catch(() => ({ platforms: [] }))]);
+  const used = [...new Set([...platforms.map((p) => p.name), ...suppliers.flatMap((s) => s.platforms)])].filter((p) => suppliers.some((s) => s.platforms.includes(p)));
+  return suppliersList({ id: ent.id, name: ent.name }, suppliers, q, { base: `#/empresa/${ent.id}`, title: "Proveedores de " + ent.name, platforms: used, target: { entity_id: ent.id },
+    note: h("span", { class: "small muted" }, "Todos los proveedores de la empresa. En cada negocio solo aparecen los de su plataforma.") });
+}
+// ---------- paquete para el contador ----------
+const libs = {};
+function loadLib(url, name) {
+  return libs[url] ||= new Promise((ok, ko) => { const el = document.createElement("script"); el.src = url; el.onload = () => ok(window[name]); el.onerror = () => { delete libs[url]; ko(new Error("No se pudo cargar una herramienta para armar el archivo. Revisa tu conexión.")); }; document.head.append(el); });
+}
+function periodRange(kind, year, n) {
+  const pad = (x) => String(x).padStart(2, "0"); const last = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+  if (kind === "anio") return [`${year}-01-01`, `${year}-12-31`, `Año ${year}`];
+  if (kind === "trimestre") { const m1 = (n - 1) * 3 + 1, m3 = m1 + 2; return [`${year}-${pad(m1)}-01`, `${year}-${pad(m3)}-${last(year, m3)}`, `${year} · ${n}.º trimestre`]; }
+  return [`${year}-${pad(n)}-01`, `${year}-${pad(n)}-${last(year, n)}`, `${MONTHS[n - 1]} de ${year}`];
+}
+async function accountantView(ent, q) {
+  const now = new Date(); const kind = q.get("periodo") || "mes"; const year = Number(q.get("anio")) || now.getFullYear();
+  const n = Number(q.get("n")) || (kind === "trimestre" ? Math.floor(now.getMonth() / 3) + 1 : now.getMonth() + 1);
+  const [from, to, label] = periodRange(kind, year, n);
+  const d = await api(`/accounting?entity=${ent.id}&from=${from}&to=${to}`);
+  const nav = (o) => `#/empresa/${ent.id}/contador?` + new URLSearchParams({ periodo: kind, anio: year, n, ...o }).toString();
+  const sel = h("div", { class: "row", style: "gap:8px;flex-wrap:wrap" },
+    h("select", { "aria-label": "Tipo de período", style: "width:auto", onchange: (e) => { location.hash = nav({ periodo: e.target.value, n: e.target.value === "trimestre" ? Math.floor(now.getMonth() / 3) + 1 : now.getMonth() + 1 }); } }, [["mes", "Mes"], ["trimestre", "Trimestre"], ["anio", "Año"]].map(([k, l]) => h("option", { value: k, selected: k === kind }, l))),
+    kind === "mes" ? h("select", { "aria-label": "Mes", style: "width:auto", onchange: (e) => { location.hash = nav({ n: e.target.value }); } }, MONTHS.map((l, i) => h("option", { value: i + 1, selected: i + 1 === n }, l))) : "",
+    kind === "trimestre" ? h("select", { "aria-label": "Trimestre", style: "width:auto", onchange: (e) => { location.hash = nav({ n: e.target.value }); } }, [1, 2, 3, 4].map((t) => h("option", { value: t, selected: t === n }, `${t}.º trimestre`))) : "",
+    h("select", { "aria-label": "Año", style: "width:auto", onchange: (e) => { location.hash = nav({ anio: e.target.value }); } }, [now.getFullYear() + 1, now.getFullYear(), now.getFullYear() - 1, now.getFullYear() - 2].map((y) => h("option", { value: y, selected: y === year }, y))));
+  const inv = d.invoices.filter((i) => i.kind !== "nota de crédito"), credits = d.invoices.filter((i) => i.kind === "nota de crédito");
+  const sum = (arr, k) => arr.reduce((a, x) => a + (Number(x[k]) || 0), 0);
+  const group = (arr, key) => { const m = new Map(); for (const x of arr) { const k = x[key] || "Sin dato"; const g = m.get(k) || { k, n: 0, total: 0, tax: 0 }; g.n++; g.total += Number(x.total) || 0; g.tax += Number(x.tax) || 0; m.set(k, g); } return [...m.values()].sort((a, z) => z.total - a.total); };
+  const cardOf = (i) => i.card ? `${i.card} · ${i.card_type === "debito" ? "Débito" : "Crédito"} •••• ${i.last4}` : i.card_last4 ? `•••• ${i.card_last4} (no registrada)` : "Sin tarjeta";
+  const bySup = group(inv, "supplier"), byBiz = group(inv, "business"), byCard = group(inv.map((i) => ({ ...i, cardtxt: cardOf(i) })), "cardtxt");
+  const stat = (l, v) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, l), h("br"), h("b", null, v));
+  const table = (title, rows, cols) => rows.length ? h("section", { class: "card stack" }, h("h2", null, title), h("div", { class: "tablewrap" }, h("table", { style: "min-width:480px" }, h("thead", null, h("tr", null, cols.map((c) => h("th", null, c[0])))), h("tbody", null, rows.map((r) => h("tr", null, cols.map((c) => h("td", { class: c[2] || "" }, c[1](r))))))))) : "";
+  const missing = { noCard: inv.filter((i) => !i.card && !i.card_last4).length, unconfirmed: inv.filter((i) => i.status !== "confirmada").length };
+  const fileName = (st) => (st || "").replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim().slice(0, 90);
+  async function buildXlsx() {
+    const XLSX = await loadLib("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js", "XLSX");
+    const wb = XLSX.utils.book_new();
+    const add = (name, rows) => XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Sin datos": "" }]), name);
+    add("Resumen", [
+      { Concepto: "Empresa", Valor: ent.name }, { Concepto: "Período", Valor: `${label} (${from} a ${to})` },
+      { Concepto: "Facturas de compra", Valor: inv.length }, { Concepto: "Subtotal compras", Valor: sum(inv, "subtotal") }, { Concepto: "Impuesto de venta pagado en compras", Valor: sum(inv, "tax") },
+      { Concepto: "Envíos cobrados", Valor: sum(inv, "shipping") }, { Concepto: "Descuentos", Valor: sum(inv, "discount") }, { Concepto: "Total compras", Valor: sum(inv, "total") },
+      { Concepto: "Notas de crédito", Valor: sum(credits, "total") }, { Concepto: "Pagos recibidos de Amazon", Valor: sum(d.payouts, "amount") },
+      { Concepto: "Facturas sin confirmar", Valor: missing.unconfirmed }, { Concepto: "Facturas sin tarjeta asociada", Valor: missing.noCard },
+      { Concepto: "Generado", Valor: new Date().toLocaleString("es-US", { timeZone: "America/Chicago" }) }]);
+    add("Compras", d.invoices.map((i) => ({ Fecha: i.issue_date || "", Tipo: i.kind, Negocio: i.business, Proveedor: i.supplier || "", "N.º fiscal proveedor": i.supplier_tax_id || "", "Factura": i.invoice_number || "", "Orden de compra": i.po_number || "",
+      Subtotal: Number(i.subtotal) || 0, Impuesto: Number(i.tax) || 0, Envío: Number(i.shipping) || 0, Descuento: Number(i.discount) || 0, Total: Number(i.total) || 0, Moneda: i.currency || "USD",
+      "Pagada con": cardOf(i), "Estado del pago": i.payment_status || "", Lote: i.lot || "", Estado: i.status === "confirmada" ? "Confirmada" : "Por revisar", Archivo: i.filename || "" })));
+    add("Productos", d.invoices.flatMap((i) => i.items.map((it) => ({ Fecha: i.issue_date || "", Proveedor: i.supplier || "", Factura: i.invoice_number || "", Producto: it.description || "", "UPC / SKU": it.upc || it.sku || "", Cantidad: Number(it.qty) || 0, "Costo unitario": Number(it.unit_cost) || 0, "Total línea": Number(it.line_total) || (Number(it.qty) || 0) * (Number(it.unit_cost) || 0), Lote: i.lot || "" }))));
+    add("Por proveedor", bySup.map((g) => ({ Proveedor: g.k, Facturas: g.n, Impuesto: g.tax, Total: g.total })));
+    add("Por tarjeta", byCard.map((g) => ({ Tarjeta: g.k, Facturas: g.n, Total: g.total })));
+    add("Pagos de Amazon", d.payouts.map((x) => ({ Fecha: x.paid_on, Negocio: x.business, Monto: x.amount, Lote: x.lot || "", Notas: x.notes || "" })));
+    add("Declaraciones", d.tax.map((t) => ({ Obligación: t.obligation, Período: t.label, Desde: t.period_start, Hasta: t.period_end, Vence: t.due_date, Estado: t.status, Monto: t.amount ?? "", Presentada: t.filed_on || "", Notas: t.notes || "" })));
+    add("Estados de cuenta", d.statements.map((x) => ({ Tarjeta: `${x.nickname} •••• ${x.last4}`, Tipo: x.card_type === "debito" ? "Débito" : "Crédito", Corte: x.closing_date, Pago: x.card_type === "debito" ? "" : x.due_date, Pagada: x.card_type === "debito" ? "" : x.paid ? "Sí" : "No", Archivo: x.filename })));
+    return XLSX.write(wb, { bookType: "xlsx", type: "array" });
+  }
+  const base = `${fileName(ent.name)} - ${fileName(label)}`;
+  const save = (blob, name) => { const a = h("a", { href: URL.createObjectURL(blob), download: name }); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000); };
+  const xlsBtn = h("button", { class: "btn sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => { save(new Blob([await buildXlsx()], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), base + ".xlsx"); toast("Excel descargado."); }) }, "Descargar Excel");
+  const zipBtn = h("button", { class: "btn primary sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => {
+    const JSZip = await loadLib("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js", "JSZip");
+    const zip = new JSZip(); zip.file(base + ".xlsx", await buildXlsx());
+    const get = async (id) => { const r = await fetch("/api/files/" + id, { credentials: "same-origin" }); if (!r.ok) throw new Error("No se pudo descargar un archivo."); return r.arrayBuffer(); };
+    const used = new Set(); const uniq = (path) => { let p = path, k = 2; while (used.has(p)) p = path.replace(/(\.[^.]+)?$/, ` (${k++})$1`); used.add(p); return p; };
+    const extOf = (f) => (f && f.includes(".") ? f.slice(f.lastIndexOf(".")) : "");
+    let nfiles = 0;
+    for (const i of d.invoices) if (i.file_id) { zip.file(uniq(`Facturas/${fileName(i.business)}/${(i.issue_date || "sin-fecha").slice(0, 7)}/${fileName([i.issue_date, i.supplier, i.invoice_number].filter(Boolean).join(" "))}${extOf(i.filename)}`), await get(i.file_id)); nfiles++; }
+    for (const x of d.statements) { zip.file(uniq(`Estados de cuenta/${fileName(x.nickname + " " + x.last4)}/${x.closing_date}${extOf(x.filename)}`), await get(x.file_id)); nfiles++; }
+    for (const t of d.tax) for (const [fid, fn, tag] of [[t.return_file_id, t.return_filename, "declaración"], [t.payment_file_id, t.payment_filename, "pago"]]) if (fid) { zip.file(uniq(`Declaraciones/${fileName(t.obligation)}/${fileName(t.label)} - ${tag}${extOf(fn)}`), await get(fid)); nfiles++; }
+    save(await zip.generateAsync({ type: "blob" }), base + ".zip"); toast(`Paquete listo: Excel y ${nfiles} archivo${nfiles === 1 ? "" : "s"}.`);
+  }) }, "Descargar paquete (ZIP)");
+  return h("div", { class: "stack", style: "gap:18px" },
+    h("section", { class: "card stack" }, h("div", { class: "row between" }, h("div", null, h("h2", null, "Paquete para el contador"), h("span", { class: "small muted" }, `${label} · todo lo de ${ent.name}, de todos sus negocios`)), sel),
+      h("div", { class: "row" }, zipBtn, xlsBtn, h("span", { class: "small muted" }, "El ZIP trae el Excel y los archivos: facturas por negocio y mes, estados de cuenta y declaraciones.")),
+      missing.unconfirmed || missing.noCard ? h("p", { class: "small", style: "margin:0;color:var(--warn)" }, [missing.unconfirmed ? `${missing.unconfirmed} factura(s) sin confirmar` : "", missing.noCard ? `${missing.noCard} sin tarjeta asociada` : ""].filter(Boolean).join(" · ") + ". Conviene revisarlas antes de mandarle el paquete.") : ""),
+    h("div", { class: "grid g4" }, stat("Compras", money(sum(inv, "total"))), stat("Impuesto de venta pagado", money(sum(inv, "tax"))), stat("Pagos de Amazon", money(sum(d.payouts, "amount"))), stat("Facturas", inv.length)),
+    table("Por negocio", byBiz, [["Negocio", (g) => g.k], ["Facturas", (g) => g.n, "mono"], ["Impuesto", (g) => money(g.tax), "mono"], ["Total", (g) => money(g.total), "mono"]]),
+    table("Por proveedor", bySup, [["Proveedor", (g) => g.k], ["Facturas", (g) => g.n, "mono"], ["Impuesto", (g) => money(g.tax), "mono"], ["Total", (g) => money(g.total), "mono"]]),
+    table("Por tarjeta", byCard, [["Tarjeta", (g) => g.k], ["Facturas", (g) => g.n, "mono"], ["Total", (g) => money(g.total), "mono"]]),
+    table("Declaraciones del período", d.tax, [["Obligación", (t) => t.obligation], ["Período", (t) => t.label], ["Vence", (t) => fdate(t.due_date), "mono"], ["Estado", (t) => pill(...(PSTATE[t.status] || [t.status, ""]))], ["Monto", (t) => t.amount != null ? money(t.amount) : "—", "mono"]]),
+    !d.invoices.length && !d.payouts.length && !d.tax.length ? h("section", { class: "card" }, h("p", { class: "empty" }, "No hay movimientos en este período.")) : "");
+}
+
+// ---------- aprobaciones de marca y categoría ----------
+const APR_ST = { por_solicitar: ["Por solicitar", "warn"], solicitada: ["Solicitada", "info"], aprobada: ["Aprobada", "ok"], rechazada: ["Rechazada", "bad"] };
+async function approvalsView(b) {
+  const [{ approvals, legal_name }, { invoices }] = await Promise.all([api("/approvals?business=" + b.id), api("/invoices?business=" + b.id)]);
+  const dlg = (a) => modal(a ? "Editar " + a.brand : "Nueva aprobación", () => h("div", { class: "stack" },
+    h("div", { class: "fgrid" }, fld("Marca", h("input", { name: "brand", required: true, value: a?.brand || "", placeholder: "Por ejemplo: Milescraft" })), fld("Categoría (si aplica)", h("input", { name: "category", value: a?.category || "" })), fld("ASIN de ejemplo", h("input", { name: "asin", value: a?.asin || "" }))),
+    h("div", { class: "fgrid" }, fld("Estado", h("select", { name: "status" }, Object.entries(APR_ST).map(([k, v]) => h("option", { value: k, selected: (a?.status || "por_solicitar") === k }, v[0])))),
+      fld("Unidades mínimas que pide Amazon", h("input", { name: "min_units", type: "number", min: "1", value: a?.min_units ?? 10 })), fld("Solicitada el", h("input", { name: "requested_on", type: "date", value: a?.requested_on || "" })), fld("Respuesta el", h("input", { name: "decided_on", type: "date", value: a?.decided_on || "" }))),
+    fld("Facturas que vas a presentar", h("div", { class: "stack", style: "gap:4px;max-height:34vh;overflow:auto" }, invoices.length ? invoices.map((i) => h("label", { class: "row", style: "gap:10px;padding:4px" }, h("input", { type: "checkbox", name: "inv", value: i.id, checked: (a?.invoice_ids || []).includes(i.id), style: "width:auto" }), h("span", { class: "small" }, [i.supplier || i.supplier_name, i.invoice_number || i.title].filter(Boolean).join(" · ") || "Factura", " · " + fdate(i.issue_date)))) : h("span", { class: "small muted" }, "No hay facturas en este negocio."))),
+    fld("Notas", h("textarea", { name: "notes", rows: "2" }, a?.notes || ""))),
+  async (fd) => { const body = Object.fromEntries(fd); body.invoice_ids = fd.getAll("inv"); delete body.inv; body.business_id = b.id; await api(a ? "/approvals/" + a.id : "/approvals", { method: a ? "PUT" : "POST", body }); toast("Guardado."); route(); });
+  return h("div", { class: "stack", style: "gap:18px" },
+    h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:680px" }, `Para desbloquear una marca, Amazon suele pedir facturas de un mayorista o del fabricante, de los últimos 180 días, con 10 unidades o más y con tu nombre y dirección iguales a los de Seller Central${legal_name ? ` (${legal_name})` : ""}. Revisa los requisitos exactos en la solicitud de cada marca.`),
+      h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => dlg() }, "+ Nueva aprobación")),
+    approvals.length ? approvals.map((a) => h("section", { class: "card stack" },
+      h("div", { class: "row between", style: "align-items:flex-start" }, h("div", { class: "stack", style: "gap:4px" }, h("h2", null, a.brand + (a.category ? " · " + a.category : "")),
+          h("span", { class: "chips" }, pill(...APR_ST[a.status]), a.asin ? pill("ASIN " + a.asin) : "", a.requested_on ? pill("Solicitada " + fdate(a.requested_on)) : "", a.decided_on ? pill("Respuesta " + fdate(a.decided_on)) : "", a.invoices.length ? pill(a.ready ? "Tienes una factura que cumple" : "Ninguna factura cumple todavía", a.ready ? "ok" : "warn") : "")),
+        h("div", { class: "row only-admin" }, h("button", { class: "btn sm", type: "button", onclick: () => dlg(a) }, "Editar"), h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Eliminar", `Se borra el registro de ${a.brand}.`, async () => { await api("/approvals/" + a.id, { method: "DELETE" }); route(); }) }, "Eliminar"))),
+      a.notes ? h("p", { class: "small", style: "margin:0;white-space:pre-wrap" }, a.notes) : "",
+      a.invoices.length ? h("div", { class: "list" }, a.invoices.map((i) => h("a", { href: "#/factura/" + i.id }, h("span", { class: "stack", style: "gap:2px" }, h("b", { style: "color:var(--ink)" }, [i.supplier, i.invoice_number].filter(Boolean).join(" · ") || "Factura"),
+        h("span", { class: "small muted" }, `${fdate(i.issue_date)} · ${i.units} unidades`), i.fails.length ? h("span", { class: "small", style: "color:var(--warn)" }, "Falta: " + i.fails.join("; ") + ".") : ""), pill(i.ok ? "Cumple" : "Revisar", i.ok ? "ok" : "warn"))))
+        : h("p", { class: "small muted", style: "margin:0" }, "Elige con “Editar” las facturas que vas a presentar y la intranet revisa si cumplen."))) : h("section", { class: "card" }, h("p", { class: "empty" }, "Registra aquí cada marca o categoría que quieras desbloquear.")));
+}
+
+// ---------- inventario por producto ----------
+async function inventoryView(b) {
+  const { items } = await api("/inventory?business=" + b.id);
+  const tot = (k) => items.reduce((a, x) => a + x.by[k], 0);
+  const stat = (l, v) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, l), h("br"), h("b", null, v));
+  const search = h("input", { type: "text", placeholder: "Buscar por producto, UPC o proveedor", style: "max-width:340px", oninput: (e) => { const t = e.target.value.toLowerCase(); body.querySelectorAll("tr").forEach((r) => { r.style.display = r.dataset.k.includes(t) ? "" : "none"; }); } });
+  const body = h("tbody", null, items.map((x) => h("tr", { "data-k": [x.description, x.upc, x.sku, x.suppliers.join(" ")].join(" ").toLowerCase() },
+    h("td", null, h("b", null, x.description || "Sin descripción"), h("div", { class: "small muted" }, [x.upc || x.sku, x.suppliers.join(", ")].filter(Boolean).join(" · "))),
+    ...["casa", "camino", "vendiendo", "recuperado"].map((k) => h("td", { class: "mono" }, x.by[k] || "—")),
+    h("td", { class: "mono" }, x.units), h("td", { class: "mono" }, x.avg_cost != null ? money(x.avg_cost) : "—"), h("td", { class: "mono" }, fdate(x.last_date)))));
+  return h("div", { class: "stack", style: "gap:18px" },
+    h("p", { class: "small muted", style: "margin:0;max-width:700px" }, "Unidades compradas según los productos de cada factura, y dónde están según la etapa de su lote. Las ventas y el stock en bodega de Amazon se ven en Seller Central."),
+    h("div", { class: "grid g4" }, stat("En casa (sin enviar)", tot("casa")), stat("En camino o en bodega", tot("camino")), stat("Vendiéndose", tot("vendiendo")), stat("Lote recuperado", tot("recuperado"))),
+    h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Productos"), search),
+      items.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:760px" }, h("thead", null, h("tr", null, ["Producto", "En casa", "En camino / bodega", "Vendiéndose", "Recuperado", "Total", "Costo prom.", "Última compra"].map((c) => h("th", null, c)))), body))
+        : h("p", { class: "empty" }, "Todavía no hay productos. Aparecen cuando confirmas facturas con sus productos y cantidades.")));
+}
+async function pageSupplier(scope, ownerId, sid, q) {
+  const active = (scope === "entity" ? "empresa-" : "negocio-") + ownerId;
+  shell(loading(), active);
+  let b, ctx, suppliers;
+  if (scope === "entity") {
+    const ent = state.entities.find((e) => e.id === ownerId); if (!ent) return pageNotFound();
+    suppliers = (await api("/suppliers?entity=" + ownerId)).suppliers;
+    b = { id: ownerId, name: ent.name };
+    ctx = { scope: "entity", id: ownerId, base: "#/empresa/" + ownerId, name: ent.name, businesses: state.businesses.filter((x) => x.entity_id === ownerId) };
+  } else {
+    const r = await Promise.all([api("/businesses/" + ownerId), api("/suppliers?business=" + ownerId)]);
+    b = r[0].business; suppliers = r[1].suppliers;
+    ctx = { scope: "business", id: ownerId, base: "#/negocio/" + ownerId, name: b.name };
+  }
+  const bid = ownerId;
   const s = suppliers.find((x) => x.id === sid); if (!s) return pageNotFound();
   const page = h("div", { class: "page" },
-    h("nav", { class: "crumbs", "aria-label": "Ruta" }, h("a", { href: "#/negocio/" + bid }, b.name), "›", h("a", { href: `#/negocio/${bid}/proveedores` }, "Proveedores"), "›", h("b", { style: "color:var(--ink)" }, s.name)),
+    h("nav", { class: "crumbs", "aria-label": "Ruta" }, h("a", { href: ctx.base }, b.name), "›", h("a", { href: `${ctx.base}/proveedores` }, "Proveedores"), "›", h("b", { style: "color:var(--ink)" }, s.name)),
     h("section", { class: "card stack" },
       h("div", { class: "row between", style: "align-items:flex-start" }, h("div", { class: "stack", style: "gap:6px" }, h("h1", null, s.name),
         h("span", { class: "chips" }, pill(...(SUP_ST[s.status || "investigar"])), s.amazon_policy ? pill(...AMZ_POL[s.amazon_policy]) : "", s.risk ? pill(...RISK[s.risk]) : "", s.kind ? pill(s.kind.split(" (")[0]) : "", s.platforms.map((p) => pill(p)), s.brand_auth === "si" ? pill("Autorización de marca: probada", "ok") : s.brand_auth === "no" ? pill("Sin autorización de marca", "bad") : pill("Autorización de marca: pendiente", "warn"))),
-        h("div", { class: "row" }, h("button", { class: "btn only-admin", type: "button", onclick: () => supplierDialog(b, s) }, "Editar"),
+        h("div", { class: "row" }, h("button", { class: "btn only-admin", type: "button", onclick: () => supplierDialog(null, s) }, "Editar"),
           isAdmin() ? h("button", { class: "btn danger", type: "button", onclick: () => confirmDelete("Eliminar proveedor", `Se borra la ficha de ${s.name}. Sus facturas no se borran: quedan en el archivo del negocio, sin proveedor asignado.`, async () => {
-            await api("/suppliers/" + s.id, { method: "DELETE" }); toast("Proveedor eliminado."); location.hash = `#/negocio/${bid}/proveedores`;
+            await api("/suppliers/" + s.id, { method: "DELETE" }); toast("Proveedor eliminado."); location.hash = `${ctx.base}/proveedores`;
           }) }, "Eliminar") : "",
-          h("button", { class: "btn primary only-upload", type: "button", onclick: () => uploadInvoiceDialog(bid, sid, suppliers) }, "Subir factura de este proveedor"))),
-      h("div", { class: "kv" }, h("div", null, h("span", null, `Comprado en ${new Date().getFullYear()}`), h("b", { class: "mono" }, money(s.year_total))), h("div", null, h("span", null, "Facturas"), h("b", { class: "mono" }, s.invoices)),
+          h("button", { class: "btn primary only-upload", type: "button", onclick: () => uploadInvoiceDialog(scope === "business" ? bid : null, sid, suppliers, ctx.businesses) }, "Subir factura de este proveedor"))),
+      h("div", { class: "kv" }, h("div", null, h("span", null, `Comprado en ${new Date().getFullYear()}`), h("b", { class: "mono" }, money(s.year_total))), h("div", null, h("span", null, "Facturas"), h("b", { class: "mono" }, s.invoices)), h("div", null, h("span", null, "Plataformas"), h("b", null, s.platforms.join(", ") || "—")),
         h("div", null, h("span", null, "Pedido mínimo"), h("b", { title: s.min_order || "" }, s.min_order ? s.min_order.split(/ \(| · /)[0].slice(0, 60) : "—")), h("div", null, h("span", null, "Condiciones de pago"), h("b", null, s.payment_terms || "—"))),
       h("div", { class: "row small muted", style: "gap:22px" }, h("span", null, "Contacto: ", h("b", { style: "color:var(--ink)" }, s.contact_name || "—"), s.email ? " · " + s.email : "", s.phone ? " · " + s.phone : ""),
         h("span", null, "Dirección: ", h("b", { style: "color:var(--ink)" }, s.address || "—")), s.tax_id ? h("span", null, "N.º fiscal: ", h("b", { style: "color:var(--ink)" }, s.tax_id)) : "",
@@ -967,16 +1130,18 @@ async function pageSupplier(bid, sid, q) {
       s.draft_channel ? h("p", { class: "small muted", style: "margin:0" }, "Canal: " + s.draft_channel) : "",
       h("pre", { class: "draft" }, s.draft_text),
       h("p", { class: "small muted", style: "margin:0" }, "La intranet no envía este correo. Cópialo, completa tus datos y envíalo tú cuando se cumpla la condición.")) : "",
-    await archiveView(b, suppliers, s, q));
-  shell(page, "negocio-" + bid);
+    await archiveView(ctx, s, q));
+  shell(page, active);
 }
-async function archiveView(b, suppliers, sup, q) {
+async function archiveView(ctx, sup, q) {
   const y = q.get("a"), m = q.get("m"), d = q.get("d");
-  const base = sup ? `#/negocio/${b.id}/proveedor/${sup.id}` : `#/negocio/${b.id}/archivo`;
+  const b = { id: ctx.id, name: ctx.name };
+  const scopeQ = `${ctx.scope === "entity" ? "entity" : "business"}=${ctx.id}`;
+  const base = sup ? `${ctx.base}/proveedor/${sup.id}` : `${ctx.base}/archivo`;
   const link = (yy, mm, dd) => base + "?" + new URLSearchParams(Object.entries({ a: yy, m: mm, d: dd }).filter(([, v]) => v)).toString();
   const [{ days }, { invoices }] = await Promise.all([
-    api(`/invoices/tree?business=${b.id}${sup ? "&supplier=" + sup.id : ""}`),
-    api(`/invoices?business=${b.id}${sup ? "&supplier=" + sup.id : ""}${y ? "&year=" + y : ""}${m ? "&month=" + m : ""}${d ? "&day=" + d : ""}`),
+    api(`/invoices/tree?${scopeQ}${sup ? "&supplier=" + sup.id : ""}`),
+    api(`/invoices?${scopeQ}${sup ? "&supplier=" + sup.id : ""}${y ? "&year=" + y : ""}${m ? "&month=" + m : ""}${d ? "&day=" + d : ""}`),
   ]);
   const years = {}; for (const r of days) { const [yy, mm, dd] = r.d.split("-"); ((years[yy] ||= {})[mm] ||= {})[dd] = r.n; }
   const sum = (o) => Object.values(o).reduce((a, v) => a + (typeof v === "number" ? v : sum(v)), 0);
@@ -994,7 +1159,7 @@ async function archiveView(b, suppliers, sup, q) {
       h("input", { type: "checkbox", "aria-label": "Seleccionar", onchange: (e) => { e.target.checked ? selected.add(i.id) : selected.delete(i.id); updateSel(); } }),
       h("span", { class: "thumb", "aria-hidden": "true" }, ext(i.filename)),
       h("span", { class: "info" }, h("a", { href: "#/factura/" + i.id, style: "font-weight:700;color:var(--ink)" }, [i.supplier || i.supplier_name, i.invoice_number ? "Factura " + i.invoice_number : i.title || i.kind].filter(Boolean).join(" · ")),
-        h("span", { class: "small muted" }, [fdate(i.issue_date), i.total != null ? money(i.total, i.currency) : "", bytes(i.size || 0)].filter(Boolean).join(" · "), " ", i.status === "confirmada" ? pill("Confirmada", "ok") : pill("Por revisar", "warn"))),
+        h("span", { class: "small muted" }, [ctx.scope === "entity" ? i.business : "", fdate(i.issue_date), i.total != null ? money(i.total, i.currency) : "", bytes(i.size || 0)].filter(Boolean).join(" · "), " ", i.status === "confirmada" ? pill("Confirmada", "ok") : pill("Por revisar", "warn"))),
       fileActions(i.file_id, () => sendDialog({ invoice_ids: [i.id] })))) : h("p", { class: "empty" }, "No hay facturas en esta fecha."));
   return h("section", { class: "card stack", style: "gap:16px" },
     h("div", { class: "row between" }, h("div", null, h("h2", null, sup ? "Facturas por fecha" : "Archivo de facturas y escaneos"), h("span", { class: "small muted" }, "Se ordenan por la fecha del documento: año › mes › día")),
@@ -1222,13 +1387,14 @@ async function route() {
   try {
     if (!parts.length) return await pageHome();
     if (parts[0] === "plataformas") return await pagePlatforms();
-    if (parts[0] === "empresa") return await pageEntity(parts[1], q.get("carpeta"));
-    if (parts[0] === "negocio" && parts[2] === "proveedor") return await pageSupplier(parts[1], parts[3], q);
+    if (parts[0] === "empresa" && parts[2] === "proveedor") return await pageSupplier("entity", parts[1], parts[3], q);
+    if (parts[0] === "empresa") return await pageEntity(parts[1], parts[2], q);
+    if (parts[0] === "negocio" && parts[2] === "proveedor") return await pageSupplier("business", parts[1], parts[3], q);
     if (parts[0] === "negocio") return await pageBusiness(parts[1], parts[2], q);
     if (parts[0] === "factura") return await pageInvoice(parts[1], q);
     if (parts[0] === "buscar") return await pageSearch(q.get("q") || "");
     if (parts[0] === "ajustes") return await pageSettings();
-    if (parts[0] === "tarjetas") return await pageCards();
+    if (parts[0] === "tarjetas") { location.replace("#/empresa/llc/tarjetas"); return; }
     if (parts[0] === "nuevo-negocio") { history.replaceState(null, "", "#/"); await pageHome(); return businessDialog(null); }
     return pageNotFound();
   } catch (e) {

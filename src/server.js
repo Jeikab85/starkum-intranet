@@ -470,6 +470,29 @@ async function importCerebro(env, b, biz) {
   return { created, updated, items: ids.length };
 }
 
+// ---------- aprobaciones de marca: qué tan lista está cada factura ----------
+function approvalCheck(inv, a, legal, addr) {
+  const items = JSON.parse(inv.items || "[]");
+  const units = items.reduce((t, i) => t + (Number(i.qty) || 0), 0);
+  const days = inv.issue_date ? Math.floor((Date.now() - Date.parse(inv.issue_date)) / 864e5) : null;
+  const norm = (x) => normName(x).replace(/\s+/g, "");
+  const fails = [];
+  if (inv.kind === "recibo") fails.push("es un recibo de tienda (Amazon pide factura de mayorista o fabricante)");
+  if (days == null) fails.push("no tiene fecha");
+  else if (days > 180) fails.push(`tiene ${days} días (Amazon suele pedir menos de 180)`);
+  if (units < (a.min_units || 10)) fails.push(`suma ${units} unidades (pides ${a.min_units || 10} o más)`);
+  if (!inv.supplier_name && !inv.supplier) fails.push("falta el nombre del proveedor");
+  if (!inv.supplier_address) fails.push("falta la dirección del proveedor");
+  if (!inv.supplier_phone && !inv.supplier_website && !inv.supplier_email) fails.push("falta un contacto del proveedor (teléfono, web o correo)");
+  if (!inv.buyer_name) fails.push("falta tu nombre como comprador");
+  else if (legal && !norm(inv.buyer_name).includes(norm(legal).slice(0, 12))) fails.push(`el comprador dice "${inv.buyer_name}" y debe coincidir con "${legal}"`);
+  if (!inv.buyer_address) fails.push("falta tu dirección como comprador");
+  else if (addr && !norm(inv.buyer_address).includes(norm(addr.split(",")[0]).slice(0, 10))) fails.push("la dirección del comprador no coincide con la de la empresa");
+  const brand = norm(a.brand);
+  if (brand && !items.some((i) => norm(i.description).includes(brand)) && !norm(inv.supplier_name || inv.supplier || "").includes(brand)) fails.push(`no veo la marca "${a.brand}" en los productos`);
+  return { id: inv.id, supplier: inv.supplier || inv.supplier_name, invoice_number: inv.invoice_number, issue_date: inv.issue_date, units, ok: !fails.length, fails };
+}
+
 // ---------- tarjetas y lotes ----------
 const NETWORKS = ["Visa", "Mastercard", "American Express", "Discover", "Otra"];
 const LOT_STAGES = ["comprado", "etiquetado", "enviado", "recibido", "vendiendo", "recuperado"];
@@ -550,8 +573,8 @@ async function api(req, env, url, user) {
     const taxDue = (await env.DB.prepare("SELECT tp.label, tp.due_date, tp.status, o.name, o.entity_id FROM tax_periods tp JOIN tax_obligations o ON o.id = tp.obligation_id WHERE o.active = 1 AND tp.status = 'pendiente' AND tp.due_date <= ? ORDER BY tp.due_date LIMIT 8").bind(new Date(Date.now() + 90 * 864e5).toISOString().slice(0, 10)).all()).results
       .map((t) => ({ title: `${t.name} · ${t.label}`, entity_id: t.entity_id, due_on: t.due_date, kind: "impuesto", overdue: t.due_date < new Date().toISOString().slice(0, 10) }));
     await ensureCycles(env);
-    const cardDue = (await env.DB.prepare("SELECT cc.due_date, c.nickname, c.last4 FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.active = 1 AND c.card_type != 'debito' AND cc.paid = 0 AND cc.due_date <= ? AND cc.closing_date <= ? ORDER BY cc.due_date LIMIT 6").bind(new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10), new Date().toISOString().slice(0, 10)).all()).results
-      .map((c) => ({ title: `Pagar el total de la tarjeta ${c.nickname} •••• ${c.last4}`, due_on: c.due_date, kind: "tarjeta", link: "#/tarjetas", overdue: c.due_date < new Date().toISOString().slice(0, 10) }));
+    const cardDue = (await env.DB.prepare("SELECT cc.due_date, c.nickname, c.last4, c.entity_id FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.active = 1 AND c.card_type != 'debito' AND cc.paid = 0 AND cc.due_date <= ? AND cc.closing_date <= ? ORDER BY cc.due_date LIMIT 6").bind(new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10), new Date().toISOString().slice(0, 10)).all()).results
+      .map((c) => ({ title: `Pagar el total de la tarjeta ${c.nickname} •••• ${c.last4}`, due_on: c.due_date, kind: "tarjeta", link: `#/empresa/${c.entity_id || "llc"}/tarjetas`, overdue: c.due_date < new Date().toISOString().slice(0, 10) }));
     const staleLots = (await env.DB.prepare("SELECT id, business_id, name, stage, dates, created_at FROM lots WHERE stage IN ('comprado','etiquetado')").all()).results
       .map((l) => ({ ...l, d: JSON.parse(l.dates || "{}").comprado || l.created_at.slice(0, 10) })).filter((l) => (Date.now() - new Date(l.d)) / 864e5 > 14)
       .map((l) => ({ title: `${l.name}: lleva ${Math.floor((Date.now() - new Date(l.d)) / 864e5)} días sin enviarse a Amazon`, due_on: l.d, kind: "lote", link: `#/negocio/${l.business_id}/lotes`, overdue: true }));
@@ -761,6 +784,15 @@ async function api(req, env, url, user) {
   }
 
   // Proveedores
+  if (p === "/suppliers" && m === "GET" && url.searchParams.get("entity")) {
+    const ent = url.searchParams.get("entity");
+    const rows = (await env.DB.prepare(`SELECT s.*, sb.name AS home_business,
+        (SELECT COUNT(*) FROM invoices i WHERE i.supplier_id = s.id) AS invoices,
+        (SELECT COALESCE(SUM(total),0) FROM invoices i WHERE i.supplier_id = s.id AND substr(i.issue_date,1,4) = ?2) AS year_total,
+        (SELECT GROUP_CONCAT(DISTINCT b.name) FROM invoices i JOIN businesses b ON b.id = i.business_id WHERE i.supplier_id = s.id) AS used_in
+      FROM suppliers s JOIN businesses sb ON sb.id = s.business_id WHERE sb.entity_id = ?1 ORDER BY s.name`).bind(ent, String(new Date().getFullYear())).all()).results;
+    return json({ suppliers: rows.map((s) => ({ ...s, platforms: JSON.parse(s.platforms || "[]") })) });
+  }
   if (p === "/suppliers" && m === "GET") {
     const biz = url.searchParams.get("business");
     // Los proveedores se comparten entre los negocios de la misma empresa (un mayorista puede surtir Amazon y Walmart)
@@ -775,6 +807,7 @@ async function api(req, env, url, user) {
   const supFields = ["name", "kind", "contact_name", "email", "phone", "website", "address", "tax_id", "brands", "min_order", "payment_terms", "brand_auth", "notes", "status", "amazon_policy", "location", "risk", "priority"];
   if (p === "/suppliers" && m === "POST") {
     const b = await body();
+    if (!b.business_id && b.entity_id) b.business_id = (await env.DB.prepare("SELECT id FROM businesses WHERE entity_id = ? ORDER BY sort, name LIMIT 1").bind(b.entity_id).first())?.id;
     if (!String(b.name || "").trim() || !b.business_id) return fail("Escribe el nombre del proveedor.");
     const id = uid();
     await env.DB.prepare(`INSERT INTO suppliers (id, business_id, ${supFields.join(", ")}, platforms, created_at) VALUES (?, ?, ${supFields.map(() => "?").join(", ")}, ?, ?)`)
@@ -798,7 +831,7 @@ async function api(req, env, url, user) {
   if (p === "/cards" && m === "GET") {
     await ensureCycles(env);
     const [cards, cycles, uses] = await Promise.all([
-      env.DB.prepare("SELECT * FROM cards WHERE active = 1 ORDER BY nickname").all(),
+      (url.searchParams.get("entity") ? env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id IS NULL OR entity_id = '' OR entity_id = ?) ORDER BY nickname").bind(url.searchParams.get("entity")) : env.DB.prepare("SELECT * FROM cards WHERE active = 1 ORDER BY nickname")).all(),
       env.DB.prepare("SELECT cc.*, f.filename FROM card_cycles cc LEFT JOIN files f ON f.id = cc.file_id ORDER BY cc.closing_date DESC").all(),
       env.DB.prepare("SELECT card_id, COUNT(*) AS n, COALESCE(SUM(total),0) AS total FROM invoices WHERE card_id IS NOT NULL GROUP BY card_id").all(),
     ]);
@@ -840,6 +873,82 @@ async function api(req, env, url, user) {
     if (cyc.file_id) await removeFile(cyc.file_id);
     await env.DB.prepare("UPDATE card_cycles SET file_id = ? WHERE id = ?").bind(fileId, mm[1]).run();
     return json({ ok: true });
+  }
+
+  // Aprobaciones de marca y categoría
+  if (p === "/approvals" && m === "GET") {
+    const biz = url.searchParams.get("business") || "amazon";
+    const b = await env.DB.prepare("SELECT b.*, e.details FROM businesses b LEFT JOIN entities e ON e.id = b.entity_id WHERE b.id = ?").bind(biz).first();
+    const det = JSON.parse(b?.details || "{}");
+    const legal = det["Nombre legal"] || det["Razón social"] || "";
+    const addr = det["Dirección"] || "";
+    const rows = (await env.DB.prepare("SELECT * FROM brand_approvals WHERE business_id = ? ORDER BY CASE status WHEN 'por_solicitar' THEN 0 WHEN 'solicitada' THEN 1 WHEN 'aprobada' THEN 2 ELSE 3 END, brand").bind(biz).all()).results;
+    const out = [];
+    for (const a of rows) {
+      const ids = JSON.parse(a.invoice_ids || "[]"); const invoices = [];
+      for (const id of ids) {
+        const inv = await env.DB.prepare("SELECT i.*, s.name AS supplier FROM invoices i LEFT JOIN suppliers s ON s.id = i.supplier_id WHERE i.id = ?").bind(id).first();
+        if (inv) invoices.push(approvalCheck(inv, a, legal, addr));
+      }
+      out.push({ ...a, invoice_ids: ids, invoices, ready: invoices.some((i) => i.ok) });
+    }
+    return json({ approvals: out, legal_name: legal, address: addr });
+  }
+  if ((p === "/approvals" && m === "POST") || ((mm = p.match(/^\/approvals\/([\w-]+)$/)) && m === "PUT")) {
+    const b = await body();
+    const st = ["por_solicitar", "solicitada", "aprobada", "rechazada"].includes(b.status) ? b.status : "por_solicitar";
+    if (m === "POST") {
+      if (!String(b.brand || "").trim()) return fail("Escribe la marca o la categoría.");
+      await env.DB.prepare("INSERT INTO brand_approvals (id, business_id, brand, category, asin, status, requested_on, decided_on, min_units, invoice_ids, notes, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(uid(), b.business_id || "amazon", b.brand.trim(), b.category || null, b.asin || null, st, isoDate(b.requested_on), isoDate(b.decided_on), Math.max(1, parseInt(b.min_units, 10) || 10), JSON.stringify(b.invoice_ids || []), b.notes || null, now()).run();
+      return json({ ok: true });
+    }
+    const a = await env.DB.prepare("SELECT * FROM brand_approvals WHERE id = ?").bind(mm[1]).first(); if (!a) return fail("No encontrada.", 404);
+    const v = (k, d) => (b[k] !== undefined ? b[k] : d);
+    await env.DB.prepare("UPDATE brand_approvals SET brand = ?, category = ?, asin = ?, status = ?, requested_on = ?, decided_on = ?, min_units = ?, invoice_ids = ?, notes = ? WHERE id = ?")
+      .bind(v("brand", a.brand), v("category", a.category), v("asin", a.asin), b.status ? st : a.status, b.requested_on !== undefined ? isoDate(b.requested_on) : a.requested_on, b.decided_on !== undefined ? isoDate(b.decided_on) : a.decided_on,
+        b.min_units !== undefined ? Math.max(1, parseInt(b.min_units, 10) || 10) : a.min_units, b.invoice_ids ? JSON.stringify(b.invoice_ids) : a.invoice_ids, v("notes", a.notes), mm[1]).run();
+    return json({ ok: true });
+  }
+  if ((mm = p.match(/^\/approvals\/([\w-]+)$/)) && m === "DELETE") { await env.DB.prepare("DELETE FROM brand_approvals WHERE id = ?").bind(mm[1]).run(); return json({ ok: true }); }
+
+  // Inventario por producto (unidades compradas según facturas y etapa del lote)
+  if (p === "/inventory" && m === "GET") {
+    const biz = url.searchParams.get("business") || "amazon";
+    const rows = (await env.DB.prepare("SELECT i.id, i.items, i.issue_date, i.currency, COALESCE(s.name, i.supplier_name) AS supplier, l.stage, l.name AS lot FROM invoices i LEFT JOIN suppliers s ON s.id = i.supplier_id LEFT JOIN lots l ON l.id = i.lot_id WHERE i.business_id = ? AND i.kind != 'nota de crédito'").bind(biz).all()).results;
+    const map = new Map();
+    const where = (st) => !st || st === "comprado" || st === "etiquetado" ? "casa" : st === "enviado" || st === "recibido" ? "camino" : st === "vendiendo" ? "vendiendo" : "recuperado";
+    for (const r of rows) for (const it of JSON.parse(r.items || "[]")) {
+      const qty = Number(it.qty) || 0; if (!qty) continue;
+      const code = String(it.upc || it.sku || "").trim();
+      const key = code ? "c:" + code.replace(/\s+/g, "") : "d:" + normName(it.description || "").slice(0, 60);
+      if (key === "d:") continue;
+      const e = map.get(key) || { key, upc: it.upc || "", sku: it.sku || "", description: it.description || "", units: 0, cost: 0, by: { casa: 0, camino: 0, vendiendo: 0, recuperado: 0 }, suppliers: new Set(), last_date: null, invoices: new Set() };
+      e.units += qty; e.cost += qty * (Number(it.unit_cost) || 0); e.by[where(r.stage)] += qty; if (r.supplier) e.suppliers.add(r.supplier); e.invoices.add(r.id);
+      if (!e.description && it.description) e.description = it.description;
+      if (r.issue_date && (!e.last_date || r.issue_date > e.last_date)) e.last_date = r.issue_date;
+      map.set(key, e);
+    }
+    const items = [...map.values()].map((e) => ({ ...e, avg_cost: e.units ? e.cost / e.units : null, suppliers: [...e.suppliers], invoices: [...e.invoices] })).sort((a, z) => (z.last_date || "").localeCompare(a.last_date || ""));
+    return json({ items });
+  }
+
+  // Paquete para el contador: todo lo de la empresa en un período
+  if (p === "/accounting" && m === "GET") {
+    const ent = url.searchParams.get("entity"); const from = isoDate(url.searchParams.get("from")); const to = isoDate(url.searchParams.get("to"));
+    if (!ent || !from || !to) return fail("Elige la empresa y el período.");
+    const [entity, invs, pays, tax, docs] = await Promise.all([
+      env.DB.prepare("SELECT * FROM entities WHERE id = ?").bind(ent).first(),
+      env.DB.prepare(`SELECT i.id, i.kind, i.invoice_number, i.po_number, i.issue_date, i.due_date, i.currency, i.subtotal, i.tax, i.shipping, i.discount, i.total, i.payment_status, i.payment_method, i.status, i.items, i.card_last4,
+          COALESCE(s.name, i.supplier_name) AS supplier, s.tax_id AS supplier_tax_id, b.name AS business, c.nickname AS card, c.card_type, c.network, c.last4, c.issuer, l.name AS lot, f.id AS file_id, f.filename, f.size
+        FROM invoices i JOIN businesses b ON b.id = i.business_id LEFT JOIN suppliers s ON s.id = i.supplier_id LEFT JOIN cards c ON c.id = i.card_id LEFT JOIN lots l ON l.id = i.lot_id LEFT JOIN files f ON f.id = i.file_id
+        WHERE b.entity_id = ? AND COALESCE(i.issue_date, substr(i.created_at,1,10)) BETWEEN ? AND ? ORDER BY COALESCE(i.issue_date, i.created_at)`).bind(ent, from, to).all(),
+      env.DB.prepare("SELECT p.*, b.name AS business, l.name AS lot FROM payouts p JOIN businesses b ON b.id = p.business_id LEFT JOIN lots l ON l.id = p.lot_id WHERE b.entity_id = ? AND p.paid_on BETWEEN ? AND ? ORDER BY p.paid_on").bind(ent, from, to).all(),
+      env.DB.prepare("SELECT tp.*, o.name AS obligation, o.agency, f1.filename AS return_filename, f2.filename AS payment_filename FROM tax_periods tp JOIN tax_obligations o ON o.id = tp.obligation_id LEFT JOIN files f1 ON f1.id = tp.return_file_id LEFT JOIN files f2 ON f2.id = tp.payment_file_id WHERE o.entity_id = ? AND tp.period_end >= ? AND tp.period_start <= ? ORDER BY tp.period_start").bind(ent, from, to).all(),
+      env.DB.prepare("SELECT cc.*, c.nickname, c.last4, c.card_type, f.filename, f.size FROM card_cycles cc JOIN cards c ON c.id = cc.card_id JOIN files f ON f.id = cc.file_id WHERE (c.entity_id IS NULL OR c.entity_id = '' OR c.entity_id = ?) AND cc.closing_date BETWEEN ? AND ? ORDER BY cc.closing_date").bind(ent, from, to).all(),
+    ]);
+    if (!entity) return fail("Empresa no encontrada.", 404);
+    return json({ entity: { id: entity.id, name: entity.name }, from, to, invoices: invs.results.map((i) => ({ ...i, items: JSON.parse(i.items || "[]") })), payouts: pays.results, tax: tax.results, statements: docs.results });
   }
 
   // Lotes y pagos de Amazon
@@ -1020,16 +1129,17 @@ async function api(req, env, url, user) {
 
   // Facturas
   if (p === "/invoices/tree") {
-    const biz = url.searchParams.get("business"); const sup = url.searchParams.get("supplier");
-    const rows = (await env.DB.prepare(`SELECT COALESCE(issue_date, substr(created_at,1,10)) AS d, COUNT(*) AS n FROM invoices WHERE business_id = ? ${sup ? "AND supplier_id = ?" : ""} GROUP BY d ORDER BY d DESC`).bind(...(sup ? [biz, sup] : [biz])).all()).results;
+    const biz = url.searchParams.get("business"); const ent = url.searchParams.get("entity"); const sup = url.searchParams.get("supplier");
+    const scope = ent ? "business_id IN (SELECT id FROM businesses WHERE entity_id = ?)" : "business_id = ?";
+    const rows = (await env.DB.prepare(`SELECT COALESCE(issue_date, substr(created_at,1,10)) AS d, COUNT(*) AS n FROM invoices WHERE ${scope} ${sup ? "AND supplier_id = ?" : ""} GROUP BY d ORDER BY d DESC`).bind(...(sup ? [ent || biz, sup] : [ent || biz])).all()).results;
     return json({ days: rows });
   }
   if (p === "/invoices" && m === "GET") {
-    const sp = url.searchParams; const where = ["i.business_id = ?"]; const args = [sp.get("business")];
+    const sp = url.searchParams; const where = [sp.get("entity") ? "i.business_id IN (SELECT id FROM businesses WHERE entity_id = ?)" : "i.business_id = ?"]; const args = [sp.get("entity") || sp.get("business")];
     if (sp.get("supplier")) { where.push("i.supplier_id = ?"); args.push(sp.get("supplier")); }
     const prefix = [sp.get("year"), sp.get("month"), sp.get("day")].filter(Boolean).join("-");
     if (prefix) { where.push("COALESCE(i.issue_date, substr(i.created_at,1,10)) LIKE ?"); args.push(prefix + "%"); }
-    const rows = (await env.DB.prepare(`SELECT i.*, s.name AS supplier, f.filename, f.mime, f.size FROM invoices i LEFT JOIN suppliers s ON s.id = i.supplier_id LEFT JOIN files f ON f.id = i.file_id WHERE ${where.join(" AND ")} ORDER BY COALESCE(i.issue_date, i.created_at) DESC LIMIT 300`).bind(...args).all()).results;
+    const rows = (await env.DB.prepare(`SELECT i.*, s.name AS supplier, b.name AS business, f.filename, f.mime, f.size FROM invoices i LEFT JOIN suppliers s ON s.id = i.supplier_id LEFT JOIN businesses b ON b.id = i.business_id LEFT JOIN files f ON f.id = i.file_id WHERE ${where.join(" AND ")} ORDER BY COALESCE(i.issue_date, i.created_at) DESC LIMIT 500`).bind(...args).all()).results;
     return json({ invoices: rows });
   }
   if (p === "/invoices" && m === "POST") {
