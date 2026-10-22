@@ -1376,7 +1376,7 @@ async function bankImportDialog(ent, opts = {}) {
       if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") {
         const tl = await pdfTextLines(f).catch(() => []);
         got = bankFromPdf(tl, { credit, dmy });
-        if (got.length < 2) {
+        if (!got.length) {
           info.textContent = "El PDF no trae los movimientos en un formato claro. Leyéndolo con IA (tarda unos segundos)…";
           const prep = tl.join("\n").trim().length > 80 ? { text: tl.join("\n") } : await prepareUpload(f);
           got = (await api("/bank/read", { method: "POST", body: { text: prep.text, image: prep.text ? null : prep.image } })).lines;
