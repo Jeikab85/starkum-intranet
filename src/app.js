@@ -1270,10 +1270,9 @@ function personalSummary(d, month, year) {
   const label = year ? "del año" : "del mes";
   const base = "#/personal/resumen";
   const acctCard = (a) => h("section", { class: "card stack", style: "gap:8px" + (a.others_money ? ";border-style:dashed" : "") },
-    h("div", { class: "row between", style: "align-items:flex-start" }, h("span", { class: "stack", style: "gap:2px" }, h("b", null, a.nickname), h("span", { class: "small muted" }, [bankOf(a.issuer), CTYPE[a.card_type], "•••• " + a.last4].join(" · "))),
-      h("span", { class: "stack", style: "gap:2px;align-items:flex-end;text-align:right" }, h("span", { class: "small muted" }, a.card_type === "debito" ? "Saldo actual" : "Deuda actual"),
-        h("b", { class: "mono", style: "font-size:18px;" + (a.card_type !== "debito" && a.balance < 0 ? "color:var(--warn)" : "") }, a.balance == null ? "—" : (a.card_type !== "debito" && a.balance < 0 ? "Debes " : "") + usd(Math.abs(a.balance))),
-        a.balance_at ? h("span", { class: "small muted" }, "al " + fdate(a.balance_at)) : "", a.others_money ? pill("No es tu dinero", "info") : "")),
+    h("span", { class: "stack", style: "gap:2px" }, h("span", { class: "row between", style: "gap:8px;flex-wrap:nowrap" }, h("b", null, a.nickname), a.others_money ? pill("No es tu dinero", "info") : ""), h("span", { class: "small muted" }, [bankOf(a.issuer), CTYPE[a.card_type], "•••• " + a.last4].join(" · "))),
+    h("div", { style: "padding:8px 10px;border-radius:10px;background:var(--line)" }, h("span", { class: "small muted" }, a.card_type === "debito" ? "Saldo actual" : "Deuda actual", a.balance_at ? " · al " + fdate(a.balance_at) : ""), h("br"),
+      h("b", { class: "mono", style: "font-size:20px;" + (a.card_type !== "debito" && a.balance < 0 ? "color:var(--warn)" : "") }, a.balance == null ? "—" : (a.card_type !== "debito" && a.balance < 0 ? "Debes " : "") + usd(Math.abs(a.balance)))),
     h("span", { class: "small muted" }, year ? `Movimientos de ${year}:` : "Movimientos del mes:"),
     h("div", { class: "row small", style: "gap:14px;flex-wrap:wrap" }, h("span", null, "Entró ", h("b", { class: "mono", style: "color:var(--ok)" }, usd(a.in_total))), h("span", null, "Salió ", h("b", { class: "mono" }, usd(a.out_total))), h("span", { class: "muted" }, `${a.n} movimiento${a.n === 1 ? "" : "s"}`)),
     a.by_category.length ? h("span", { class: "small muted" }, "En qué: " + a.by_category.slice(0, 3).map((c) => `${c.category} ${usd(c.total)}`).join(" · ")) : "",
