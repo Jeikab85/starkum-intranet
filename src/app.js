@@ -1278,6 +1278,13 @@ function personalSummary(d, month, year) {
     h("span", { class: "small muted" }, year ? `Movimientos de ${year}:` : "Movimientos del mes:"),
     h("div", { class: "row small", style: "gap:14px;flex-wrap:wrap" }, h("span", null, "Entró ", h("b", { class: "mono", style: "color:var(--ok)" }, usd(a.in_total))), h("span", null, "Salió ", h("b", { class: "mono" }, usd(a.out_total))), h("span", { class: "muted" }, `${a.n} movimiento${a.n === 1 ? "" : "s"}`)),
     a.by_category.length ? h("span", { class: "small muted" }, "En qué: " + a.by_category.slice(0, 3).map((c) => `${c.category} ${usd(c.total)}`).join(" · ")) : "",
+    (a.owners || []).length > 1 || ((a.owners || [])[0] && a.owners[0].owner !== (a.money_owner || "personal")) ? h("div", { class: "stack", style: "gap:4px;padding:8px 10px;border-radius:10px;border:1px solid var(--line)" },
+      h("b", { class: "small" }, "Movimientos por persona"),
+      ...a.owners.map((o) => { const own = o.owner === (a.money_owner || "personal"); const who = o.owner === "personal" ? "Tú" : ownerName(o.owner, d.people);
+        const accWho = (a.money_owner || "personal") === "personal" ? "ti" : ownerName(a.money_owner, d.people);
+        const note = own ? "dueño de la cuenta" : o.net > 0 ? `a favor de ${who === "Tú" ? "ti" : who}: ${usd(o.net)}` : o.net < 0 ? `${who === "Tú" ? "le debes" : "debe"} ${usd(-o.net)} a ${accWho === "ti" ? "ti" : accWho}` : "en cero";
+        return h("div", { class: "row between small", style: "gap:6px;flex-wrap:wrap" }, h("span", null, h("b", null, who), h("span", { class: "muted" }, ` · ${o.n} mov. · entró ${usd(o.in)} · salió ${usd(o.out)}`)),
+          h("span", { style: own || !o.net ? "color:var(--muted)" : (o.net < 0 ? who === "Tú" : accWho === "ti") ? "color:var(--warn);font-weight:700" : (o.net < 0 ? accWho === "ti" : who === "Tú") ? "color:var(--ok);font-weight:700" : "font-weight:700" }, note)); })) : "",
     h("a", { class: "small", href: `#/personal/movimientos?${year ? "anio=" + year : "mes=" + month}&cuenta=${a.id}`, style: "font-weight:700" }, "Ver movimientos →"));
   return h("div", { class: "stack", style: "gap:18px" },
     h("div", { class: "row between" }, monthNav(base, month, year), h("div", { class: "row only-admin", style: "gap:8px" },
@@ -1287,6 +1294,12 @@ function personalSummary(d, month, year) {
     h("h2", { style: "margin:0" }, "Lo tuyo", h("span", { class: "small muted", style: "font-weight:400" }, " · solo los movimientos marcados como tuyos")),
     h("div", { class: "grid g4" }, stat("Patrimonio (cuentas − tarjetas)", usd(cash - owed), cash - owed < 0 ? "color:var(--bad)" : ""), stat("Disponible en tus cuentas", usd(cash)), stat("Debes en tarjetas", usd(owed), owed ? "color:var(--warn)" : ""), stat("Ahorro " + label, usd(d.income - d.spend), d.income - d.spend < 0 ? "color:var(--bad)" : "color:var(--ok)")),
     h("div", { class: "grid g4" }, stat("Ingresos " + label, usd(d.income)), stat("Gastos " + label, usd(d.spend)), stat("Suscripciones " + label, usd(d.sub_charges.reduce((s, x) => s + (x.currency === "USD" ? x.amount : 0), 0))), stat("Promedio de gasto al mes", usd(year ? d.spend / Math.max(1, Number(year) === new Date().getFullYear() ? new Date().getMonth() + 1 : 12) : d.spend))),
+    (d.between || []).length ? h("section", { class: "card stack", style: "gap:8px" }, h("h2", null, "Cuentas entre personas"),
+      h("p", { class: "small muted", style: "margin:0" }, "Sale de los movimientos que marcaste con otra persona en una cuenta que no es suya. Es el acumulado de todo el historial, no solo de este período."),
+      ...d.between.map((x) => { const dn = x.debtor === "personal" ? "Tú" : ownerName(x.debtor, d.people), cn = x.creditor === "personal" ? "ti" : ownerName(x.creditor, d.people);
+        return h("div", { class: "row between", style: "gap:8px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--line)" },
+          h("span", null, h("b", null, dn), x.debtor === "personal" ? ` le debes a ${cn}` : ` le debe a ${cn}`, h("span", { class: "small muted" }, ` · ${x.n} movimiento${x.n === 1 ? "" : "s"}`)),
+          h("b", { class: "mono", style: x.debtor === "personal" ? "color:var(--warn)" : "color:var(--ok)" }, usd(x.amount))); })) : "",
     h("div", { class: "split" },
       h("section", { class: "card stack", style: "flex:1 1 360px" }, h("h2", null, "En qué se fue tu dinero"), catBars(d.by_category, usd)),
       h("section", { class: "card stack", style: "flex:1 1 300px" }, h("h2", null, "General: todas las cuentas"),

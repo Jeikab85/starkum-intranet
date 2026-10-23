@@ -1591,10 +1591,23 @@ async function api(req, env, url, user) {
       return { ...pp, n: l.length, cash: Math.round(accs.reduce((s2, a) => s2 + (Number(a.card_type === "debito" && a.available ? a.available : a.balance) || 0), 0) * 100) / 100, accounts: accs.map((a) => a.nickname), ...tally(l) }; });
     const starkum = all.filter((x) => x.owner === "starkum"); const toStarkum = Math.round(starkum.reduce((s2, x) => s2 - x.amount, 0) * 100) / 100;
     const income = mine.income, spend = mine.spend; const byCat = Object.fromEntries(mine.by_category.map((c) => [c.category, c.total]));
+    // Quién movió dinero en cada cuenta y cuánto se deben entre personas (histórico, no solo del período)
+    const r2 = (v) => Math.round(v * 100) / 100;
+    const ownersIn = (l) => { const g = {}; for (const x of l) { const k = x.owner; g[k] = g[k] || { owner: k, n: 0, in: 0, out: 0 }; g[k].n++; if (x.amount > 0) g[k].in += x.amount; else g[k].out -= x.amount; }
+      return Object.values(g).map((o) => ({ ...o, in: r2(o.in), out: r2(o.out), net: r2(o.in - o.out) })).sort((a, z) => z.n - a.n); };
+    const visible = new Set(accts.results.map((a) => a.id));
+    const hist = (await env.DB.prepare("SELECT amount, owner, status, card_id FROM bank_lines WHERE entity_id = 'personal' AND status != 'ignorado' AND card_id IS NOT NULL").all()).results.filter((l) => visible.has(l.card_id));
+    const pairs = {};
+    for (const l of hist) { const who = lineOwner(l), acc = acctOwner[l.card_id] || "personal"; if (who === acc || acc === "otro" || who === "otro") continue;
+      // l.amount > 0: entró dinero de "who" a la cuenta de "acc" → acc le debe a who. l.amount < 0: who gastó dinero de acc → who le debe a acc.
+      const [a1, b1] = [acc, who].sort(); const k = a1 + "|" + b1; const sign = acc === a1 ? 1 : -1;
+      pairs[k] = pairs[k] || { a: a1, b: b1, owes: 0, n: 0 }; pairs[k].owes += sign * l.amount; pairs[k].n++; }
+    // owes > 0: "a" le debe a "b"; owes < 0: "b" le debe a "a"
+    const between = Object.values(pairs).filter((x) => Math.abs(x.owes) > 0.004).map((x) => x.owes > 0 ? { debtor: x.a, creditor: x.b, amount: r2(x.owes), n: x.n } : { debtor: x.b, creditor: x.a, amount: r2(-x.owes), n: x.n });
     const perAccount = accts.results.map((a) => { const l = all.filter((x) => x.card_id === a.id); const t = tally(l);
-      return { id: a.id, nickname: a.nickname, issuer: a.issuer, last4: a.last4, card_type: a.card_type, others_money: !!a.others_money, balance: a.balance, available: a.available, balance_at: a.balance_at, n: l.length, in_total: Math.round(l.filter((x) => x.amount > 0).reduce((s2, x) => s2 + x.amount, 0) * 100) / 100, out_total: Math.round(l.filter((x) => x.amount < 0).reduce((s2, x) => s2 - x.amount, 0) * 100) / 100, ...t }; });
+      return { id: a.id, nickname: a.nickname, issuer: a.issuer, last4: a.last4, card_type: a.card_type, others_money: !!a.others_money, balance: a.balance, available: a.available, balance_at: a.balance_at, n: l.length, owners: ownersIn(l.filter((x) => x.kind === "banco")), in_total: Math.round(l.filter((x) => x.amount > 0).reduce((s2, x) => s2 + x.amount, 0) * 100) / 100, out_total: Math.round(l.filter((x) => x.amount < 0).reduce((s2, x) => s2 - x.amount, 0) * 100) / 100, ...t }; });
     const sMap = Object.fromEntries(st.results.map((r) => [r.key, r.value]));
-    return json({ month, year: yr, from, to, accounts: accts.results.map((a) => ({ ...a, money_owner: acctOwner[a.id] })), per_account: perAccount.map((a) => ({ ...a, money_owner: acctOwner[a.id] })), general, people, by_person: byPerson, starkum: { n: starkum.length, total: toStarkum }, items: all.sort((a, z) => z.date.localeCompare(a.date)).slice(0, yr ? 3000 : 600), by_category: Object.entries(byCat).map(([k, v]) => ({ category: k, total: Math.round(v * 100) / 100 })).filter((x) => x.total > 0.004).sort((a, z) => z.total - a.total),
+    return json({ month, year: yr, from, to, accounts: accts.results.map((a) => ({ ...a, money_owner: acctOwner[a.id] })), per_account: perAccount.map((a) => ({ ...a, money_owner: acctOwner[a.id] })), general, people, by_person: byPerson, between, starkum: { n: starkum.length, total: toStarkum }, items: all.sort((a, z) => z.date.localeCompare(a.date)).slice(0, yr ? 3000 : 600), by_category: Object.entries(byCat).map(([k, v]) => ({ category: k, total: Math.round(v * 100) / 100 })).filter((x) => x.total > 0.004).sort((a, z) => z.total - a.total),
       income: Math.round(income * 100) / 100, spend: Math.round(spend * 100) / 100, due: cycles.results, sub_charges: subs.results.flatMap((s) => subCharges(s, from, to).map((d) => ({ date: d, name: s.name, amount: s.amount, currency: s.currency }))),
       categories: PCATS, sfin: { connected: !!sMap.sfin_access, vault: !!(await vaultKey(env)), status: sMap.sfin_status ? JSON.parse(sMap.sfin_status) : null } });
   }
