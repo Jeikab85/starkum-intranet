@@ -27,6 +27,7 @@ const MIGRATIONS = [
   "ALTER TABLE cards ADD COLUMN balance REAL", "ALTER TABLE cards ADD COLUMN balance_at TEXT", "ALTER TABLE cards ADD COLUMN sfin_id TEXT", "ALTER TABLE cards ADD COLUMN currency TEXT",
   "ALTER TABLE bank_lines ADD COLUMN category TEXT", "ALTER TABLE bank_lines ADD COLUMN ext_id TEXT", "ALTER TABLE bank_lines ADD COLUMN pending INTEGER NOT NULL DEFAULT 0",
   "CREATE INDEX IF NOT EXISTS bank_ext ON bank_lines(ext_id)",
+  "ALTER TABLE cards ADD COLUMN others_money INTEGER NOT NULL DEFAULT 0",
   "CREATE TABLE IF NOT EXISTS p_rules (id TEXT PRIMARY KEY, pattern TEXT NOT NULL UNIQUE, category TEXT NOT NULL, created_at TEXT NOT NULL)",
   "INSERT OR IGNORE INTO entities (id, name, country, details) VALUES ('personal', 'Personal', 'Solo para ti', '{}')",
   "UPDATE suppliers SET kind = 'Herramientas/Suscripciones', status = COALESCE(NULLIF(status,'investigar'), 'activo') WHERE id IN (SELECT supplier_id FROM invoices WHERE kind = 'suscripción' AND supplier_id IS NOT NULL) AND COALESCE(kind, 'Otro') = 'Otro'",
@@ -396,15 +397,33 @@ async function sfinGet(env, path) {
   if (!r.ok) throw new Error("SimpleFIN no respondió (" + r.status + ").");
   return r.json();
 }
-async function sfinSync(env, days = 30) {
-  const start = Math.floor((Date.now() - days * 864e5) / 1000);
-  const data = await sfinGet(env, `/accounts?start-date=${start}&pending=1`);
-  const cards = (await env.DB.prepare("SELECT id, entity_id, sfin_id FROM cards WHERE sfin_id IS NOT NULL").all()).results;
-  let added = 0; const touched = new Map();
+// Trae el historial por tramos de 45 días (SimpleFIN limita el rango de cada consulta)
+async function sfinSync(env, days = 30, fromDate = null) {
+  const startMs = fromDate ? Date.parse(fromDate + "T00:00:00Z") : Date.now() - days * 864e5;
+  const windows = [];
+  for (let a = startMs; a < Date.now(); a += 45 * 864e5) windows.push([Math.floor(a / 1000), Math.floor(Math.min(Date.now() + 864e5, a + 45 * 864e5) / 1000)]);
+  let added = 0; const errors = []; const touched = new Map();
+  for (let w = 0; w < windows.length; w++) {
+    const [s0, e0] = windows[w];
+    const data = await sfinGet(env, `/accounts?start-date=${s0}&end-date=${e0}&pending=1`);
+    errors.push(...(data.errors || []));
+    const r = await sfinStore(env, data, w === windows.length - 1, touched);
+    added += r;
+  }
+  await categorizePersonal(env);
+  for (const [ent, r] of touched) await reconcile(env, ent, r.from, r.to);
+  const status = { last_sync: now(), added, from: new Date(startMs).toISOString().slice(0, 10), errors: [...new Set(errors)].slice(0, 5) };
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sfin_status', ?)").bind(JSON.stringify(status)).run();
+  return status;
+}
+async function sfinStore(env, data, updateBalances, touched) {
+  const cards = (await env.DB.prepare("SELECT id, entity_id, owner, sfin_id FROM cards WHERE sfin_id IS NOT NULL").all()).results;
+  let added = 0;
   for (const a of data.accounts || []) {
     const card = cards.find((c) => c.sfin_id === a.id); if (!card) continue;
-    await env.DB.prepare("UPDATE cards SET balance = ?, balance_at = ?, currency = ? WHERE id = ?").bind(num(a.balance), a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : now(), a.currency || "USD", card.id).run();
-    const ent = card.entity_id || "personal";
+    if (updateBalances) await env.DB.prepare("UPDATE cards SET balance = ?, balance_at = ?, currency = ? WHERE id = ?").bind(num(a.balance), a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : now(), a.currency || "USD", card.id).run();
+    // Las tarjetas personales registradas en una empresa (para sus facturas) llevan sus movimientos al espacio Personal
+    const ent = card.entity_id === "personal" || card.owner === "personal" || !card.entity_id ? "personal" : card.entity_id;
     const ids = (a.transactions || []).map((t) => `sfin:${a.id}:${t.id}`);
     const have = new Set();
     for (let i = 0; i < ids.length; i += 90) { const part = ids.slice(i, i + 90); (await env.DB.prepare(`SELECT ext_id FROM bank_lines WHERE ext_id IN (${part.map(() => "?").join(",")})`).bind(...part).all()).results.forEach((r) => have.add(r.ext_id)); }
@@ -421,11 +440,7 @@ async function sfinSync(env, days = 30) {
     }
     for (let i = 0; i < ins.length; i += 80) await env.DB.batch(ins.slice(i, i + 80));
   }
-  await categorizePersonal(env);
-  for (const [ent, r] of touched) await reconcile(env, ent, r.from, r.to);
-  const status = { last_sync: now(), added, errors: (data.errors || []).slice(0, 5) };
-  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sfin_status', ?)").bind(JSON.stringify(status)).run();
-  return status;
+  return added;
 }
 
 // ---------- roles ----------
@@ -1248,7 +1263,8 @@ async function api(req, env, url, user) {
   if (p === "/cards" && m === "GET") {
     await ensureCycles(env);
     const [cards, cycles, uses] = await Promise.all([
-      (url.searchParams.get("entity") ? env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id IS NULL OR entity_id = '' OR entity_id = ?) ORDER BY nickname").bind(url.searchParams.get("entity")) : env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND COALESCE(entity_id, '') != 'personal' ORDER BY nickname")).all(),
+      (url.searchParams.get("entity") === "personal" ? env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id = 'personal' OR owner = 'personal') ORDER BY others_money, nickname")
+        : url.searchParams.get("entity") ? env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND COALESCE(entity_id, '') != 'personal' AND (entity_id IS NULL OR entity_id = '' OR entity_id = ?) ORDER BY nickname").bind(url.searchParams.get("entity")) : env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND COALESCE(entity_id, '') != 'personal' ORDER BY nickname")).all(),
       env.DB.prepare("SELECT cc.*, f.filename FROM card_cycles cc LEFT JOIN files f ON f.id = cc.file_id ORDER BY cc.closing_date DESC").all(),
       env.DB.prepare("SELECT card_id, COUNT(*) AS n, COALESCE(SUM(total),0) AS total FROM invoices WHERE card_id IS NOT NULL GROUP BY card_id").all(),
     ]);
@@ -1509,27 +1525,33 @@ async function api(req, env, url, user) {
   if (p.startsWith("/personal") && !isAdmin) return fail("No encontrado.", 404);
   if (p === "/personal/summary" && m === "GET") {
     await categorizePersonal(env);
+    const yr = /^\d{4}$/.test(url.searchParams.get("year") || "") ? url.searchParams.get("year") : null;
     const month = /^\d{4}-\d{2}$/.test(url.searchParams.get("month") || "") ? url.searchParams.get("month") : now().slice(0, 7);
-    const from = month + "-01", to = addMonthsClamp(from, 1, 1) < from ? from : shiftDate(addMonthsClamp(from, 1, 1), -1);
+    const from = yr ? `${yr}-01-01` : month + "-01", to = yr ? `${yr}-12-31` : shiftDate(addMonthsClamp(month + "-01", 1, 1), -1);
     const today = now().slice(0, 10);
     const [accts, lines, moves, subs, cycles, st] = await Promise.all([
-      env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND entity_id = 'personal' ORDER BY card_type DESC, nickname").all(),
+      env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id = 'personal' OR owner = 'personal') ORDER BY others_money, card_type DESC, nickname").all(),
       env.DB.prepare("SELECT bl.*, c.nickname AS card, c.last4, c.issuer FROM bank_lines bl LEFT JOIN cards c ON c.id = bl.card_id WHERE bl.entity_id = 'personal' AND bl.posted_on BETWEEN ? AND ? AND bl.status NOT IN ('ignorado') ORDER BY bl.posted_on DESC, bl.created_at DESC").bind(from, to).all(),
       env.DB.prepare("SELECT * FROM money_moves WHERE entity_id = 'personal' AND moved_on BETWEEN ? AND ? ORDER BY moved_on DESC").bind(from, to).all(),
       env.DB.prepare("SELECT * FROM subscriptions WHERE entity_id = 'personal'").all(),
       env.DB.prepare("SELECT cc.*, c.nickname, c.last4, c.issuer FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.entity_id = 'personal' AND c.card_type != 'debito' AND cc.paid = 0 AND cc.due_date BETWEEN ? AND ? ORDER BY cc.due_date").bind(shiftDate(today, -10), shiftDate(today, 40)).all(),
       env.DB.prepare("SELECT key, value FROM settings WHERE key IN ('sfin_access', 'sfin_status')").all(),
     ]);
-    const all = [...lines.results.map((l) => ({ kind: "banco", id: l.id, date: l.posted_on, desc: l.description, amount: l.amount, category: l.category || "Otros", card: l.card ? `${l.card} •••• ${l.last4}` : "", status: l.status, pending: l.pending })),
+    const others = new Set(accts.results.filter((a) => a.others_money).map((a) => a.id));
+    const all = [...lines.results.map((l) => ({ kind: "banco", id: l.id, date: l.posted_on, desc: l.description, amount: l.amount, category: l.category || "Otros", card: l.card ? `${l.card} •••• ${l.last4}` : "", card_id: l.card_id, others: others.has(l.card_id), status: l.status, pending: l.pending })),
       ...moves.results.map((x) => ({ kind: "manual", id: x.id, date: x.moved_on, desc: x.concept, amount: x.kind === "ingreso" ? x.amount : -x.amount, category: x.category || (x.kind === "ingreso" ? "Ingresos" : "Otros"), card: "" }))];
-    const byCat = {}; let income = 0, spend = 0;
-    for (const x of all) {
-      if (x.status === "empresa") continue;
-      if (x.category === "Ingresos" && x.amount > 0) income += x.amount;
-      else if (!NOT_SPENDING.includes(x.category)) { spend += -x.amount; byCat[x.category] = (byCat[x.category] || 0) - x.amount; }
-    }
+    // Totales: "lo tuyo" excluye las cuentas cuyo dinero no es tuyo; "general" las incluye
+    const tally = (list) => { const byCat = {}; let income = 0, spend = 0;
+      for (const x of list) { if (x.status === "empresa") continue;
+        if (x.category === "Ingresos" && x.amount > 0) income += x.amount;
+        else if (!NOT_SPENDING.includes(x.category)) { spend += -x.amount; byCat[x.category] = (byCat[x.category] || 0) - x.amount; } }
+      return { income: Math.round(income * 100) / 100, spend: Math.round(spend * 100) / 100, by_category: Object.entries(byCat).map(([k, v]) => ({ category: k, total: Math.round(v * 100) / 100 })).filter((c) => c.total > 0.004).sort((a, z) => z.total - a.total) }; };
+    const mine = tally(all.filter((x) => !x.others)), general = tally(all);
+    const income = mine.income, spend = mine.spend; const byCat = Object.fromEntries(mine.by_category.map((c) => [c.category, c.total]));
+    const perAccount = accts.results.map((a) => { const l = all.filter((x) => x.card_id === a.id); const t = tally(l);
+      return { id: a.id, nickname: a.nickname, issuer: a.issuer, last4: a.last4, card_type: a.card_type, others_money: !!a.others_money, balance: a.balance, n: l.length, in_total: Math.round(l.filter((x) => x.amount > 0).reduce((s2, x) => s2 + x.amount, 0) * 100) / 100, out_total: Math.round(l.filter((x) => x.amount < 0).reduce((s2, x) => s2 - x.amount, 0) * 100) / 100, ...t }; });
     const sMap = Object.fromEntries(st.results.map((r) => [r.key, r.value]));
-    return json({ month, from, to, accounts: accts.results, items: all.sort((a, z) => z.date.localeCompare(a.date)).slice(0, 400), by_category: Object.entries(byCat).map(([k, v]) => ({ category: k, total: Math.round(v * 100) / 100 })).filter((x) => x.total > 0.004).sort((a, z) => z.total - a.total),
+    return json({ month, year: yr, from, to, accounts: accts.results, per_account: perAccount, general, items: all.sort((a, z) => z.date.localeCompare(a.date)).slice(0, yr ? 3000 : 600), by_category: Object.entries(byCat).map(([k, v]) => ({ category: k, total: Math.round(v * 100) / 100 })).filter((x) => x.total > 0.004).sort((a, z) => z.total - a.total),
       income: Math.round(income * 100) / 100, spend: Math.round(spend * 100) / 100, due: cycles.results, sub_charges: subs.results.flatMap((s) => subCharges(s, from, to).map((d) => ({ date: d, name: s.name, amount: s.amount, currency: s.currency }))),
       categories: PCATS, sfin: { connected: !!sMap.sfin_access, vault: !!(await vaultKey(env)), status: sMap.sfin_status ? JSON.parse(sMap.sfin_status) : null } });
   }
@@ -1561,6 +1583,11 @@ async function api(req, env, url, user) {
     await env.DB.prepare("INSERT INTO money_moves (id, entity_id, kind, moved_on, amount, currency, concept, category, notes, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
       .bind(uid(), b.entity_id, out ? "gasto" : "ingreso", l.posted_on, Math.abs(l.amount), "USD", l.description.slice(0, 200), b.category || (out ? "Otros gastos" : "Otros ingresos"), out ? "Pagado con una cuenta personal: el contador lo registra como aporte del dueño." : "Recibido en una cuenta personal.", user.email, now()).run();
     await env.DB.prepare("UPDATE bank_lines SET category = 'Empresa (Starkum)', status = 'empresa', locked = 1, match_label = ? WHERE id = ?").bind("Registrado en " + (b.entity_id === "llc" ? "Starkum Holdings LLC" : "Starkum Group SAS"), mm[1]).run();
+    return json({ ok: true });
+  }
+  if ((mm = p.match(/^\/personal\/accounts\/([\w-]+)\/others$/)) && m === "PUT") {
+    const b = await body();
+    await env.DB.prepare("UPDATE cards SET others_money = ? WHERE id = ?").bind(b.others ? 1 : 0, mm[1]).run();
     return json({ ok: true });
   }
   if ((mm = p.match(/^\/personal\/accounts\/([\w-]+)\/balance$/)) && m === "PUT") {
@@ -1599,7 +1626,7 @@ async function api(req, env, url, user) {
     if (!cardId && b.create) {
       const c = b.create; const last4 = String(c.last4 || "").replace(/\D/g, "").slice(-4) || "0000";
       cardId = uid();
-      await env.DB.prepare("INSERT INTO cards (id, nickname, issuer, last4, owner, entity_id, card_type, created_at) VALUES (?,?,?,?,?,?,?,?)").bind(cardId, String(c.nickname || "Cuenta").slice(0, 60), c.issuer || null, last4, c.entity_id === "personal" ? "personal" : "empresa", ["llc", "sas", "personal"].includes(c.entity_id) ? c.entity_id : "personal", c.card_type === "credito" ? "credito" : "debito", now()).run();
+      await env.DB.prepare("INSERT INTO cards (id, nickname, issuer, last4, owner, entity_id, card_type, others_money, created_at) VALUES (?,?,?,?,?,?,?,?,?)").bind(cardId, String(c.nickname || "Cuenta").slice(0, 60), c.issuer || null, last4, c.entity_id === "personal" ? "personal" : "empresa", ["llc", "sas", "personal"].includes(c.entity_id) ? c.entity_id : "personal", c.card_type === "credito" ? "credito" : "debito", c.others ? 1 : 0, now()).run();
     }
     if (cardId) await env.DB.prepare("UPDATE cards SET sfin_id = ? WHERE id = ?").bind(b.sfin_id, cardId).run();
     return json({ ok: true, card_id: cardId });
@@ -1608,8 +1635,9 @@ async function api(req, env, url, user) {
     const st = (await env.DB.prepare("SELECT value FROM settings WHERE key = 'sfin_status'").first())?.value;
     const last = st ? JSON.parse(st).last_sync : null;
     if (last && Date.now() - Date.parse(last) < 10 * 60000 && env.DEV !== "1") return fail("Ya se sincronizó hace menos de 10 minutos. SimpleFIN limita las consultas por día.");
+    const b = await body().catch(() => ({}));
     const first = !(await env.DB.prepare("SELECT id FROM bank_lines WHERE ext_id IS NOT NULL LIMIT 1").first());
-    try { return json(await sfinSync(env, first ? 90 : 30)); } catch (e) { return fail(e.message, 502); }
+    try { return json(await sfinSync(env, first ? 90 : 30, isoDate(b?.from))); } catch (e) { return fail(e.message, 502); }
   }
   if (p === "/personal/sfin" && m === "DELETE") {
     await env.DB.batch([env.DB.prepare("DELETE FROM settings WHERE key IN ('sfin_access', 'sfin_status')"), env.DB.prepare("UPDATE cards SET sfin_id = NULL")]);
