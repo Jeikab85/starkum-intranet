@@ -29,7 +29,7 @@ const MIGRATIONS = [
   "CREATE INDEX IF NOT EXISTS bank_ext ON bank_lines(ext_id)",
   "ALTER TABLE cards ADD COLUMN others_money INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE bank_lines ADD COLUMN cat_manual INTEGER NOT NULL DEFAULT 0",
-  "ALTER TABLE cards ADD COLUMN available REAL", "ALTER TABLE cards ADD COLUMN bank_balance_at TEXT",
+  "ALTER TABLE cards ADD COLUMN available REAL", "ALTER TABLE cards ADD COLUMN bank_balance_at TEXT", "ALTER TABLE cards ADD COLUMN hide_summary INTEGER NOT NULL DEFAULT 0",
   "CREATE TABLE IF NOT EXISTS p_rules (id TEXT PRIMARY KEY, pattern TEXT NOT NULL UNIQUE, category TEXT NOT NULL, created_at TEXT NOT NULL)",
   "INSERT OR IGNORE INTO entities (id, name, country, details) VALUES ('personal', 'Personal', 'Solo para ti', '{}')",
   "UPDATE suppliers SET kind = 'Herramientas/Suscripciones', status = COALESCE(NULLIF(status,'investigar'), 'activo') WHERE id IN (SELECT supplier_id FROM invoices WHERE kind = 'suscripción' AND supplier_id IS NOT NULL) AND COALESCE(kind, 'Otro') = 'Otro'",
@@ -1552,6 +1552,13 @@ async function api(req, env, url, user) {
       env.DB.prepare("SELECT cc.*, c.nickname, c.last4, c.issuer FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.entity_id = 'personal' AND c.card_type != 'debito' AND cc.paid = 0 AND cc.due_date BETWEEN ? AND ? ORDER BY cc.due_date").bind(shiftDate(today, -10), shiftDate(today, 40)).all(),
       env.DB.prepare("SELECT key, value FROM settings WHERE key IN ('sfin_access', 'sfin_status')").all(),
     ]);
+    // En el Resumen no aparecen las cuentas que marcaste como ocultas (ni en totales ni en categorías)
+    if (url.searchParams.get("scope") === "resumen") {
+      const hidden = new Set(accts.results.filter((a) => a.hide_summary).map((a) => a.id));
+      accts.results = accts.results.filter((a) => !hidden.has(a.id));
+      lines.results = lines.results.filter((l) => !hidden.has(l.card_id));
+      cycles.results = cycles.results.filter((c) => !hidden.has(c.card_id));
+    }
     const others = new Set(accts.results.filter((a) => a.others_money).map((a) => a.id));
     const all = [...lines.results.map((l) => ({ kind: "banco", id: l.id, date: l.posted_on, desc: l.description, amount: l.amount, category: l.category || "Otros", card: l.card ? `${l.card} •••• ${l.last4}` : "", card_id: l.card_id, others: others.has(l.card_id), status: l.status, pending: l.pending })),
       ...moves.results.map((x) => ({ kind: "manual", id: x.id, date: x.moved_on, desc: x.concept, amount: x.kind === "ingreso" ? x.amount : -x.amount, category: x.category || (x.kind === "ingreso" ? "Ingresos" : "Otros"), card: "" }))];
@@ -1600,6 +1607,11 @@ async function api(req, env, url, user) {
     await env.DB.prepare("UPDATE bank_lines SET category = 'Empresa (Starkum)', status = 'empresa', locked = 1, match_label = ? WHERE id = ?").bind("Registrado en " + (b.entity_id === "llc" ? "Starkum Holdings LLC" : "Starkum Group SAS"), mm[1]).run();
     return json({ ok: true });
   }
+  if ((mm = p.match(/^\/personal\/accounts\/([\w-]+)\/visible$/)) && m === "PUT") {
+    const b = await body();
+    await env.DB.prepare("UPDATE cards SET hide_summary = ? WHERE id = ?").bind(b.show ? 0 : 1, mm[1]).run();
+    return json({ ok: true });
+  }
   if ((mm = p.match(/^\/personal\/accounts\/([\w-]+)\/others$/)) && m === "PUT") {
     const b = await body();
     await env.DB.prepare("UPDATE cards SET others_money = ? WHERE id = ?").bind(b.others ? 1 : 0, mm[1]).run();
@@ -1630,7 +1642,7 @@ async function api(req, env, url, user) {
   if (p === "/personal/sfin/accounts" && m === "GET") {
     const data = await sfinGet(env, "/accounts?balances-only=1").catch((e) => ({ error: e.message }));
     if (data.error) return fail(data.error, 502);
-    const cards = (await env.DB.prepare("SELECT id, nickname, last4, entity_id, sfin_id, card_type FROM cards WHERE sfin_id IS NOT NULL").all()).results;
+    const cards = (await env.DB.prepare("SELECT id, nickname, last4, entity_id, sfin_id, card_type, hide_summary FROM cards WHERE sfin_id IS NOT NULL").all()).results;
     const list = data.accounts || []; const ids = list.map((a) => a.id);
     // Cuentas ya vistas: lo que no esté en esta lista es nuevo en SimpleFIN
     const seenRaw = (await env.DB.prepare("SELECT value FROM settings WHERE key = 'sfin_seen'").first())?.value;

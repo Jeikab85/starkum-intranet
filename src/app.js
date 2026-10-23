@@ -1249,7 +1249,7 @@ async function pagePersonal(tab, q) {
   else if (tab === "suscripciones") content = await subsView(ent, null, q);
   else if (tab === "conexion") content = await sfinView();
   else {
-    const d = await api("/personal/summary?" + (year ? "year=" + year : "month=" + month));
+    const d = await api("/personal/summary?" + (year ? "year=" + year : "month=" + month) + (tab === "movimientos" ? "" : "&scope=resumen"));
     content = tab === "movimientos" ? personalMoves(d, month, year) : personalSummary(d, month, year);
   }
   shell(h("div", { class: "page" }, ...head, content), act);
@@ -1428,7 +1428,11 @@ async function sfinView() {
         sel.onchange = async () => { const v = sel.value; const body = { sfin_id: a.id };
           if (v.startsWith("new:")) { const [, e2, t] = v.split(":"); body.create = { entity_id: e2, card_type: t, nickname: a.name.slice(0, 60), issuer: a.org, last4: (a.name.match(/(\d{4})\D*$/) || [])[1] || "0000" }; } else body.card_id = v || null;
           await api("/personal/sfin/map", { method: "POST", body }); toast(v ? "Cuenta asignada. Sincroniza para traer sus movimientos." : "Cuenta sin asignar."); route(); };
-        return h("div", { class: "row between", style: "padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", { class: "stack", style: "gap:2px" }, h("span", null, h("b", null, a.name), a.is_new ? [" ", pill("Nueva", "ok")] : !a.card ? [" ", pill("Sin asignar")] : ""), h("span", { class: "small muted" }, `${a.org} · ` + (a.balance < 0 ? `debes ${money(Math.abs(a.balance), a.currency || "USD")}` : `disponible ${money(a.available ? a.available : a.balance || 0, a.currency || "USD")}`))), sel);
+        const vis = a.card ? h("label", { class: "row small", style: "gap:6px;white-space:nowrap;cursor:pointer", title: "Si la desmarcas, esta cuenta no aparece en el Resumen (ni en sus totales). Sigue sincronizándose y sus movimientos siguen en Movimientos." },
+          h("input", { type: "checkbox", checked: !a.card.hide_summary, style: "width:auto", onchange: async (e) => { const on = e.target.checked; e.target.disabled = true;
+            try { await api(`/personal/accounts/${a.card.id}/visible`, { method: "PUT", body: { show: on } }); a.card.hide_summary = on ? 0 : 1; toast(on ? `${a.name}: se muestra en el Resumen.` : `${a.name}: oculta en el Resumen.`); } catch (err) { e.target.checked = !on; toast(err.message); } finally { e.target.disabled = false; } } }),
+          "Mostrar en Resumen") : h("span", { class: "small muted", style: "white-space:nowrap" }, "Asígnala para mostrarla");
+        return h("div", { class: "row between", style: "padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", { class: "stack", style: "gap:2px" }, h("span", null, h("b", null, a.name), a.is_new ? [" ", pill("Nueva", "ok")] : !a.card ? [" ", pill("Sin asignar")] : ""), h("span", { class: "small muted" }, `${a.org} · ` + (a.balance < 0 ? `debes ${money(Math.abs(a.balance), a.currency || "USD")}` : `disponible ${money(a.available ? a.available : a.balance || 0, a.currency || "USD")}`))), h("span", { class: "row", style: "gap:14px;flex-wrap:wrap" }, vis, sel));
       })),
       h("p", { class: "small muted", style: "margin:0" }, "Si una cuenta es de la empresa (por ejemplo, la Chase de Starkum), asígnala a la cuenta de la LLC: sus movimientos llegan solos a la conciliación del banco de la empresa."));
   }
