@@ -1375,6 +1375,7 @@ function balanceDialog(c) {
     h("p", { class: "small muted", style: "margin:0" }, "Si conectas esta cuenta con SimpleFIN, el saldo se actualiza solo todos los días.")),
   async (fd) => { const v = Math.abs(Number(fd.get("balance")) || 0); await api(`/personal/accounts/${c.id}/balance`, { method: "PUT", body: { balance: c.card_type === "debito" ? v : -v } }); toast("Saldo actualizado."); route(); });
 }
+let sfinCheck = false;
 async function sfinView() {
   const d = await api("/personal/summary");
   const st = d.sfin;
@@ -1400,12 +1401,26 @@ async function sfinView() {
     h("p", { class: "small muted", style: "margin:0" }, "Solo lectura: SimpleFIN no permite mover dinero. Se sincroniza sola una vez al día; puedes forzarla con \"Sincronizar ahora\"."));
   let accBox = "";
   if (st.connected) {
-    const [r, { cards }] = await Promise.all([api("/personal/sfin/accounts").catch((e) => ({ error: e.message })), api("/cards")]);
+    const doCheck = sfinCheck; sfinCheck = false;
+    const [r, { cards }] = await Promise.all([api("/personal/sfin/accounts" + (doCheck ? "?check=1" : "")).catch((e) => ({ error: e.message })), api("/cards")]);
+    const ck = doCheck && r.check ? r.check : null;
+    const checkBox = ck ? h("div", { class: "card stack", style: "gap:4px;background:var(--line);border-color:" + (ck.added.length || ck.removed.length ? "var(--warn)" : "var(--line)") },
+      h("b", null, ck.added.length || ck.removed.length ? "Hay cambios en SimpleFIN" : "Todo al día: no hay cuentas nuevas ni eliminadas."),
+      h("span", { class: "small" }, `SimpleFIN tiene ${ck.total} cuenta(s) conectada(s).`),
+      ck.added.length ? h("span", { class: "small" }, h("b", null, "Nuevas: "), ck.added.join(" · "), ". Asígnalas abajo para traer sus movimientos.") : "",
+      ck.removed.length ? h("span", { class: "small" }, h("b", null, "Ya no están en SimpleFIN: "), ck.removed.join(" · "), ". Sus movimientos se conservan; abajo puedes quitar el vínculo.") : "") : "";
+    const missBox = r.missing?.length ? h("div", { class: "stack", style: "gap:8px;padding:10px;border:1px dashed var(--warn);border-radius:10px" },
+      h("b", { class: "small" }, "Vinculadas en la intranet pero ya no aparecen en SimpleFIN"),
+      ...r.missing.map((c) => h("div", { class: "row between", style: "flex-wrap:wrap;gap:8px" }, h("span", null, `${c.nickname} •••• ${c.last4}`, " ", pill("Eliminada en SimpleFIN", "warn")),
+        h("button", { class: "btn sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => { await api("/personal/sfin/map", { method: "POST", body: { sfin_id: c.sfin_id, card_id: null } }); toast("Vínculo quitado. La cuenta y sus movimientos se quedan."); route(); }) }, "Quitar vínculo"))),
+      h("span", { class: "small muted" }, "Si la volviste a conectar en SimpleFIN, aparece como cuenta nueva: asígnala a la misma cuenta y sigue donde iba.")) : "";
     const pcards = (await api("/cards?entity=personal")).cards;
     const all = [...cards, ...pcards.filter((c) => !cards.some((x) => x.id === c.id))];
     accBox = h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Cuentas conectadas"),
-        h("span", { class: "row", style: "gap:8px" }, h("button", { class: "btn primary sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => { const s2 = await api("/personal/sfin/sync", { method: "POST" }); toast(`Sincronizado: ${s2.added} movimiento(s) nuevos.`); route(); }) }, "Sincronizar ahora"),
+        h("span", { class: "row", style: "gap:8px" }, h("button", { class: "btn sm", type: "button", title: "Revisa en SimpleFIN si agregaste o eliminaste cuentas", onclick: (e) => busy(e.currentTarget, async () => { sfinCheck = true; await route(); }) }, "↻ Actualizar cuentas"),
+          h("button", { class: "btn primary sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => { const s2 = await api("/personal/sfin/sync", { method: "POST" }); toast(`Sincronizado: ${s2.added} movimiento(s) nuevos.`); route(); }) }, "Sincronizar ahora"),
           h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Desconectar SimpleFIN", "Se borra el acceso guardado. Los movimientos ya traídos se quedan.", async () => { await api("/personal/sfin", { method: "DELETE" }); toast("Desconectado."); route(); }) }, "Desconectar"))),
+      checkBox, missBox,
       r.error ? h("p", { class: "small", style: "color:var(--bad);margin:0" }, r.error) : h("div", { class: "stack", style: "gap:10px" }, r.accounts.map((a) => {
         const sel = h("select", { "aria-label": "Asignar " + a.name, style: "width:auto;max-width:320px" }, h("option", { value: "" }, "Sin asignar (no se trae)"),
           h("optgroup", { label: "Crear nueva" }, h("option", { value: "new:personal:debito" }, "Nueva cuenta personal"), h("option", { value: "new:personal:credito" }, "Nueva tarjeta de crédito personal")),
@@ -1413,7 +1428,7 @@ async function sfinView() {
         sel.onchange = async () => { const v = sel.value; const body = { sfin_id: a.id };
           if (v.startsWith("new:")) { const [, e2, t] = v.split(":"); body.create = { entity_id: e2, card_type: t, nickname: a.name.slice(0, 60), issuer: a.org, last4: (a.name.match(/(\d{4})\D*$/) || [])[1] || "0000" }; } else body.card_id = v || null;
           await api("/personal/sfin/map", { method: "POST", body }); toast(v ? "Cuenta asignada. Sincroniza para traer sus movimientos." : "Cuenta sin asignar."); route(); };
-        return h("div", { class: "row between", style: "padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", { class: "stack", style: "gap:2px" }, h("b", null, a.name), h("span", { class: "small muted" }, `${a.org} · saldo ${money(Math.abs(a.balance || 0), a.currency || "USD")}`)), sel);
+        return h("div", { class: "row between", style: "padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", { class: "stack", style: "gap:2px" }, h("span", null, h("b", null, a.name), a.is_new ? [" ", pill("Nueva", "ok")] : !a.card ? [" ", pill("Sin asignar")] : ""), h("span", { class: "small muted" }, `${a.org} · saldo ${money(Math.abs(a.balance || 0), a.currency || "USD")}`)), sel);
       })),
       h("p", { class: "small muted", style: "margin:0" }, "Si una cuenta es de la empresa (por ejemplo, la Chase de Starkum), asígnala a la cuenta de la LLC: sus movimientos llegan solos a la conciliación del banco de la empresa."));
   }

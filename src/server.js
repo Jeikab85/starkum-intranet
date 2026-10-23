@@ -1630,8 +1630,19 @@ async function api(req, env, url, user) {
   if (p === "/personal/sfin/accounts" && m === "GET") {
     const data = await sfinGet(env, "/accounts?balances-only=1").catch((e) => ({ error: e.message }));
     if (data.error) return fail(data.error, 502);
-    const cards = (await env.DB.prepare("SELECT id, nickname, last4, entity_id, sfin_id FROM cards WHERE sfin_id IS NOT NULL").all()).results;
-    return json({ accounts: (data.accounts || []).map((a) => ({ id: a.id, name: a.name, org: a.org?.name || a.org?.domain || "", currency: a.currency, balance: num(a.balance), available: num(a["available-balance"]), balance_date: a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : null, card: cards.find((c) => c.sfin_id === a.id) || null })), errors: data.errors || [] });
+    const cards = (await env.DB.prepare("SELECT id, nickname, last4, entity_id, sfin_id, card_type FROM cards WHERE sfin_id IS NOT NULL").all()).results;
+    const list = data.accounts || []; const ids = list.map((a) => a.id);
+    // Cuentas ya vistas: lo que no esté en esta lista es nuevo en SimpleFIN
+    const seenRaw = (await env.DB.prepare("SELECT value FROM settings WHERE key = 'sfin_seen'").first())?.value;
+    const seen = seenRaw ? JSON.parse(seenRaw) : null;
+    const isNew = (id) => !!seen && !seen.includes(id);
+    const missing = cards.filter((c) => !ids.includes(c.sfin_id)).map(({ sfin_id, ...c }) => ({ ...c, sfin_id }));
+    const out = { accounts: list.map((a) => ({ id: a.id, name: a.name, org: a.org?.name || a.org?.domain || "", currency: a.currency, balance: num(a.balance), available: num(a["available-balance"]), balance_date: a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : null, card: cards.find((c) => c.sfin_id === a.id) || null, is_new: isNew(a.id) })), missing, errors: data.errors || [], checked_at: now() };
+    if (!seen || url.searchParams.get("check") === "1") {
+      out.check = { added: list.filter((a) => isNew(a.id)).map((a) => a.name), removed: missing.map((c) => `${c.nickname} •••• ${c.last4}`), total: list.length };
+      await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sfin_seen', ?)").bind(JSON.stringify(ids)).run();
+    }
+    return json(out);
   }
   if (p === "/personal/sfin/map" && m === "POST") {
     const b = await body();
