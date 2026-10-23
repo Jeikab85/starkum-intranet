@@ -802,7 +802,7 @@ function scanItemDialog(b, it) {
 }
 // ---------- tarjetas ----------
 const NETS = ["Visa", "Mastercard", "American Express", "Discover", "Otra"];
-const CTYPE = { credito: "Crédito", debito: "Débito" };
+const CTYPE = { credito: "Crédito", debito: "Débito", prestamo: "Préstamo" };
 // Nombre del banco a partir del emisor de la tarjeta o cuenta
 function bankOf(issuer) {
   const t = String(issuer || "").trim();
@@ -849,7 +849,7 @@ async function cardsView(entityId) {
       debit ? kv("Día de corte del extracto", c.closing_day ? "Día " + c.closing_day : "Fin de mes") : kv("Día de cierre", c.closing_day ? "Día " + c.closing_day : ""),
       debit ? "" : kv("Día límite de pago", c.due_day ? "Día " + c.due_day : ""), debit ? "" : kv("Límite de crédito", c.credit_limit != null ? money(c.credit_limit) : ""),
       kv("Es de", c.owner === "empresa" ? "La empresa" : "Uso personal"), c.notes ? kv("Notas", c.notes) : "",
-      c.balance != null ? kv(c.card_type === "debito" ? "Saldo" : "Saldo de la tarjeta", (c.card_type !== "debito" && c.balance < 0 ? "Debes " : "") + money(Math.abs(c.balance), c.currency || "USD") + (c.balance_at ? ` · ${fdate(c.balance_at)}` : "")) : "",
+      c.balance != null ? kv(c.card_type === "debito" ? "Saldo" : c.card_type === "prestamo" ? "Saldo del préstamo" : "Saldo de la tarjeta", (c.card_type !== "debito" && c.balance < 0 ? "Debes " : "") + money(Math.abs(c.balance), c.currency || "USD") + (c.balance_at ? ` · ${fdate(c.balance_at)}` : "")) : "",
       c.sfin_id ? kv("Conexión", "Automática (SimpleFIN)") : "",
       entityId === "personal" ? h("div", null, h("span", null, "¿De quién es el dinero?"), h("select", { style: "width:auto;margin-top:4px", "aria-label": "Dueño del dinero de esta cuenta", onchange: async (e) => { const v = e.target.value; await api(`/personal/accounts/${c.id}/owner`, { method: "PUT", body: { owner: v } }); toast(v === "personal" ? "Marcada como tuya." : `Marcada como dinero de ${ownerName(v, state.people)}: sus movimientos son de esa persona salvo que cambies alguno.`); route(); } },
         ownerList(state.people).filter(([k]) => k !== "starkum").map(([k, l]) => h("option", { value: k, selected: k === (c.money_owner || (c.others_money ? "" : "personal")) }, l)), !c.money_owner && c.others_money ? h("option", { value: "", selected: true, disabled: true }, "Otra persona (elige quién)") : "")) : "");
@@ -1264,8 +1264,9 @@ function catBars(list, usd) {
 function personalSummary(d, month, year) {
   const usd = (v) => money(v, "USD");
   const mineAccts = d.accounts.filter((a) => (a.money_owner || "personal") === "personal");
-  const debit = mineAccts.filter((a) => a.card_type === "debito"), credit = mineAccts.filter((a) => a.card_type !== "debito");
-  const cash = debit.reduce((s, a) => s + (effBal(a) || 0), 0), owed = credit.reduce((s, a) => s + Math.abs(Math.min(0, Number(a.balance) || 0)), 0);
+  const debit = mineAccts.filter((a) => a.card_type === "debito"), credit = mineAccts.filter((a) => a.card_type === "credito" || !a.card_type), loans = mineAccts.filter((a) => a.card_type === "prestamo");
+  const owedOf = (list) => list.reduce((s, a) => s + Math.abs(Math.min(0, Number(a.balance) || 0)), 0);
+  const cash = debit.reduce((s, a) => s + (effBal(a) || 0), 0), cardsOwed = owedOf(credit), loansOwed = owedOf(loans), owed = cardsOwed + loansOwed;
   const othersCash = d.accounts.filter((a) => (a.money_owner || "personal") !== "personal").reduce((s, a) => s + (effBal(a) || 0), 0);
   const stat = (l, v, cls) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, l), h("br"), h("b", { style: cls || "" }, v));
   const label = year ? "del año" : "del mes";
@@ -1292,7 +1293,7 @@ function personalSummary(d, month, year) {
       h("button", { class: "btn primary sm", type: "button", onclick: () => personalMoveDialog(d.categories) }, "+ Movimiento manual"))),
     !d.sfin.connected ? h("section", { class: "card row between" }, h("span", { class: "small" }, "Conecta tus bancos para que los movimientos y saldos lleguen solos todos los días."), h("a", { class: "btn sm", href: "#/personal/conexion" }, "Conectar bancos")) : "",
     h("h2", { style: "margin:0" }, "Lo tuyo", h("span", { class: "small muted", style: "font-weight:400" }, " · solo los movimientos marcados como tuyos")),
-    h("div", { class: "grid g4" }, stat("Patrimonio (cuentas − tarjetas)", usd(cash - owed), cash - owed < 0 ? "color:var(--bad)" : ""), stat("Disponible en tus cuentas", usd(cash)), stat("Debes en tarjetas", usd(owed), owed ? "color:var(--warn)" : ""), stat("Ahorro " + label, usd(d.income - d.spend), d.income - d.spend < 0 ? "color:var(--bad)" : "color:var(--ok)")),
+    h("div", { class: "grid g4", style: loans.length ? "grid-template-columns:repeat(auto-fit,minmax(170px,1fr))" : "" }, stat(loans.length ? "Patrimonio (cuentas − tarjetas − préstamos)" : "Patrimonio (cuentas − tarjetas)", usd(cash - owed), cash - owed < 0 ? "color:var(--bad)" : ""), stat("Disponible en tus cuentas", usd(cash)), stat("Debes en tarjetas", usd(cardsOwed), cardsOwed ? "color:var(--warn)" : ""), loans.length ? stat("Debes en préstamos", usd(loansOwed), loansOwed ? "color:var(--warn)" : "") : "", stat("Ahorro " + label, usd(d.income - d.spend), d.income - d.spend < 0 ? "color:var(--bad)" : "color:var(--ok)")),
     h("div", { class: "grid g4" }, stat("Ingresos " + label, usd(d.income)), stat("Gastos " + label, usd(d.spend)), stat("Suscripciones " + label, usd(d.sub_charges.reduce((s, x) => s + (x.currency === "USD" ? x.amount : 0), 0))), stat("Promedio de gasto al mes", usd(year ? d.spend / Math.max(1, Number(year) === new Date().getFullYear() ? new Date().getMonth() + 1 : 12) : d.spend))),
     (d.between || []).length ? h("section", { class: "card stack", style: "gap:8px" }, h("h2", null, "Cuentas entre personas"),
       h("p", { class: "small muted", style: "margin:0" }, "Sale de los movimientos que marcaste con otra persona en una cuenta que no es suya. Es el acumulado de todo el historial, no solo de este período."),
@@ -1390,7 +1391,7 @@ function balanceLine(c) {
   const debt = c.card_type !== "debito" && c.balance < 0;
   return h("span", { class: "stack", style: "gap:0" },
     h("b", { class: "mono", style: `font-size:22px;${debt ? "color:var(--warn)" : ""}` }, balanceText(c)),
-    h("span", { class: "small muted" }, c.balance == null ? (c.sfin_id ? "Sincroniza para traer el saldo" : "Actualízalo a mano o conéctala") : `${c.card_type === "debito" ? "Saldo disponible" : "Saldo de la tarjeta"} al ${fdate(c.balance_at)}${c.sfin_id ? " · automático" : ""}${c.others_money ? (c.money_owner && c.money_owner !== "personal" ? " · dinero de " + ownerName(c.money_owner, state.people) : " · no es tu dinero") : ""}`),
+    h("span", { class: "small muted" }, c.balance == null ? (c.sfin_id ? "Sincroniza para traer el saldo" : "Actualízalo a mano o conéctala") : `${c.card_type === "debito" ? "Saldo disponible" : c.card_type === "prestamo" ? "Saldo del préstamo" : "Saldo de la tarjeta"} al ${fdate(c.balance_at)}${c.sfin_id ? " · automático" : ""}${c.others_money ? (c.money_owner && c.money_owner !== "personal" ? " · dinero de " + ownerName(c.money_owner, state.people) : " · no es tu dinero") : ""}`),
     ledgerNote(c) ? h("span", { class: "small muted" }, ledgerNote(c)) : "");
 }
 function balancesTable(cards) {
@@ -1460,7 +1461,7 @@ async function sfinView() {
       checkBox, missBox,
       r.error ? h("p", { class: "small", style: "color:var(--bad);margin:0" }, r.error) : h("div", { class: "stack", style: "gap:10px" }, r.accounts.map((a) => {
         const sel = h("select", { "aria-label": "Asignar " + a.name, style: "width:auto;max-width:320px" }, h("option", { value: "" }, "Sin asignar (no se trae)"),
-          h("optgroup", { label: "Crear nueva" }, h("option", { value: "new:personal:debito" }, "Nueva cuenta personal"), h("option", { value: "new:personal:credito" }, "Nueva tarjeta de crédito personal")),
+          h("optgroup", { label: "Crear nueva" }, h("option", { value: "new:personal:debito" }, "Nueva cuenta personal"), h("option", { value: "new:personal:credito" }, "Nueva tarjeta de crédito personal"), h("option", { value: "new:personal:prestamo" }, "Nuevo préstamo personal (carro, estudio…)")),
           ...byBank(all).map(([bank, list]) => h("optgroup", { label: bank }, list.map((c) => h("option", { value: c.id, selected: a.card?.id === c.id }, `${c.nickname} •••• ${c.last4}` + (c.entity_id === "personal" ? " (personal)" : c.entity_id ? " (" + (c.entity_id === "llc" ? "LLC" : "SAS") + ")" : ""))))));
         sel.onchange = async () => { const v = sel.value; const body = { sfin_id: a.id };
           if (v.startsWith("new:")) { const [, e2, t] = v.split(":"); body.create = { entity_id: e2, card_type: t, nickname: a.name.slice(0, 60), issuer: a.org, last4: (a.name.match(/(\d{4})\D*$/) || [])[1] || "0000" }; } else body.card_id = v || null;

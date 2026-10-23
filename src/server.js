@@ -323,8 +323,8 @@ async function backfillStatements(env) {
 }
 
 // ---------- espacio Personal: categorías, cuentas y conexión con SimpleFIN ----------
-const PCATS = ["Ingresos", "Supermercado", "Restaurantes y comida", "Transporte y gasolina", "Vivienda", "Servicios (luz, agua, internet, celular)", "Salud y deporte", "Compras", "Entretenimiento", "Suscripciones", "Educación", "Viajes", "Familia y regalos", "Préstamos y créditos", "Efectivo (cajero)", "Trámites y legales", "Comisiones bancarias", "Impuestos", "Pago de tarjeta", "Transferencias", "Ahorro e inversión", "Empresa (Starkum)", "Otros"];
-const NOT_SPENDING = ["Pago de tarjeta", "Transferencias", "Ahorro e inversión", "Empresa (Starkum)", "Ingresos"];
+const PCATS = ["Ingresos", "Supermercado", "Restaurantes y comida", "Transporte y gasolina", "Vivienda", "Servicios (luz, agua, internet, celular)", "Salud y deporte", "Compras", "Entretenimiento", "Suscripciones", "Educación", "Viajes", "Familia y regalos", "Préstamos y créditos", "Movimientos del préstamo", "Efectivo (cajero)", "Trámites y legales", "Comisiones bancarias", "Impuestos", "Pago de tarjeta", "Transferencias", "Ahorro e inversión", "Empresa (Starkum)", "Otros"];
+const NOT_SPENDING = ["Movimientos del préstamo", "Pago de tarjeta", "Transferencias", "Ahorro e inversión", "Empresa (Starkum)", "Ingresos"];
 const SELF_RE = /jonth|caballero|withdrawal to|deposit from|transfer (to|from)|to (checking|savings)|from (checking|savings)|online banking transfer|internal transfer/i;
 const PRULES = [
   ["Pago de tarjeta", /payment to chase card|chase credit crd|payment credit one|credit one bank.*payment|capital one.*(pymt|payment|mobile pmt)|discover.*(payment|pymt)|card payment|crd epay|payment[\s\-–:]*thank you|internet payment|mobile payment|autopay|automatic payment|card payment|crd pmt|credit card payment|pago tarjeta|epayment|e-payment|online payment.*card/i],
@@ -353,6 +353,8 @@ function autoCategory(desc, amount, rules, cardType) {
   if (r) return r.category;
   if (SELF_RE.test(desc)) return "Transferencias";
   // En una tarjeta de crédito, lo que entra es un pago a la tarjeta, una devolución o una recompensa; nunca un ingreso
+  // En la cuenta del préstamo (carro, etc.) los pagos ya salieron como gasto desde tu cuenta de banco: no se cuentan dos veces
+  if (cardType === "prestamo") return "Movimientos del préstamo";
   if (cardType === "credito" && amount > 0) return /refund|return|reembolso|devoluci/i.test(desc) ? "Compras" : /reward|cash ?back|statement credit|bonus/i.test(desc) ? "Ingresos" : "Pago de tarjeta";
   const card = PRULES.find((x) => x[0] === "Pago de tarjeta")[1], tr = PRULES.find((x) => x[0] === "Transferencias")[1];
   if (amount > 0) { if (card.test(desc)) return "Pago de tarjeta"; if (/refund|reembolso|return/i.test(desc)) return "Compras"; if (tr.test(desc)) return "Transferencias"; return "Ingresos"; }
@@ -1312,7 +1314,7 @@ async function api(req, env, url, user) {
     if (last4.length !== 4) return fail("Escribe solo los últimos 4 dígitos de la tarjeta.");
     if (!String(b.nickname || "").trim()) return fail("Ponle un nombre corto a la tarjeta (por ejemplo, Chase personal).");
     const day = (v) => { const n = parseInt(v, 10); return n >= 1 && n <= 31 ? n : null; };
-    const vals = [String(b.nickname).trim().slice(0, 60), b.issuer || null, NETWORKS.includes(b.network) ? b.network : null, b.holder || null, last4, day(b.exp_month) && day(b.exp_month) <= 12 ? day(b.exp_month) : null, Number(b.exp_year) > 2000 ? Number(b.exp_year) : null, b.owner === "empresa" ? "empresa" : "personal", b.entity_id || null, day(b.closing_day), day(b.due_day), num(b.credit_limit), b.notes || null, b.card_type === "debito" ? "debito" : "credito"];
+    const vals = [String(b.nickname).trim().slice(0, 60), b.issuer || null, NETWORKS.includes(b.network) ? b.network : null, b.holder || null, last4, day(b.exp_month) && day(b.exp_month) <= 12 ? day(b.exp_month) : null, Number(b.exp_year) > 2000 ? Number(b.exp_year) : null, b.owner === "empresa" ? "empresa" : "personal", b.entity_id || null, day(b.closing_day), day(b.due_day), num(b.credit_limit), b.notes || null, ["debito", "prestamo"].includes(b.card_type) ? b.card_type : "credito"];
     if (m === "POST") { const id = uid(); await env.DB.prepare("INSERT INTO cards (id, nickname, issuer, network, holder, last4, exp_month, exp_year, owner, entity_id, closing_day, due_day, credit_limit, notes, card_type, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(id, ...vals, now()).run(); return json({ id }); }
     await env.DB.prepare("UPDATE cards SET nickname = ?, issuer = ?, network = ?, holder = ?, last4 = ?, exp_month = ?, exp_year = ?, owner = ?, entity_id = ?, closing_day = ?, due_day = ?, credit_limit = ?, notes = ?, card_type = ? WHERE id = ?").bind(...vals, mm[1]).run();
     await env.DB.prepare("DELETE FROM card_cycles WHERE card_id = ? AND paid = 0 AND file_id IS NULL AND closing_date >= ?").bind(mm[1], new Date().toISOString().slice(0, 10)).run();
@@ -1725,7 +1727,7 @@ async function api(req, env, url, user) {
     if (!cardId && b.create) {
       const c = b.create; const last4 = String(c.last4 || "").replace(/\D/g, "").slice(-4) || "0000";
       cardId = uid();
-      await env.DB.prepare("INSERT INTO cards (id, nickname, issuer, last4, owner, entity_id, card_type, others_money, created_at) VALUES (?,?,?,?,?,?,?,?,?)").bind(cardId, String(c.nickname || "Cuenta").slice(0, 60), c.issuer || null, last4, c.entity_id === "personal" ? "personal" : "empresa", ["llc", "sas", "personal"].includes(c.entity_id) ? c.entity_id : "personal", c.card_type === "credito" ? "credito" : "debito", c.others ? 1 : 0, now()).run();
+      await env.DB.prepare("INSERT INTO cards (id, nickname, issuer, last4, owner, entity_id, card_type, others_money, created_at) VALUES (?,?,?,?,?,?,?,?,?)").bind(cardId, String(c.nickname || "Cuenta").slice(0, 60), c.issuer || null, last4, c.entity_id === "personal" ? "personal" : "empresa", ["llc", "sas", "personal"].includes(c.entity_id) ? c.entity_id : "personal", ["credito", "prestamo"].includes(c.card_type) ? c.card_type : "debito", c.others ? 1 : 0, now()).run();
     }
     if (cardId) await env.DB.prepare("UPDATE cards SET sfin_id = ? WHERE id = ?").bind(b.sfin_id, cardId).run();
     return json({ ok: true, card_id: cardId });
