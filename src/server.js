@@ -28,6 +28,7 @@ const MIGRATIONS = [
   "ALTER TABLE bank_lines ADD COLUMN category TEXT", "ALTER TABLE bank_lines ADD COLUMN ext_id TEXT", "ALTER TABLE bank_lines ADD COLUMN pending INTEGER NOT NULL DEFAULT 0",
   "CREATE INDEX IF NOT EXISTS bank_ext ON bank_lines(ext_id)",
   "ALTER TABLE cards ADD COLUMN others_money INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE bank_lines ADD COLUMN cat_manual INTEGER NOT NULL DEFAULT 0",
   "CREATE TABLE IF NOT EXISTS p_rules (id TEXT PRIMARY KEY, pattern TEXT NOT NULL UNIQUE, category TEXT NOT NULL, created_at TEXT NOT NULL)",
   "INSERT OR IGNORE INTO entities (id, name, country, details) VALUES ('personal', 'Personal', 'Solo para ti', '{}')",
   "UPDATE suppliers SET kind = 'Herramientas/Suscripciones', status = COALESCE(NULLIF(status,'investigar'), 'activo') WHERE id IN (SELECT supplier_id FROM invoices WHERE kind = 'suscripción' AND supplier_id IS NOT NULL) AND COALESCE(kind, 'Otro') = 'Otro'",
@@ -321,35 +322,45 @@ async function backfillStatements(env) {
 }
 
 // ---------- espacio Personal: categorías, cuentas y conexión con SimpleFIN ----------
-const PCATS = ["Ingresos", "Supermercado", "Restaurantes y comida", "Transporte y gasolina", "Vivienda", "Servicios (luz, agua, internet, celular)", "Salud", "Compras", "Entretenimiento", "Suscripciones", "Educación", "Viajes", "Familia y regalos", "Comisiones bancarias", "Impuestos", "Pago de tarjeta", "Transferencias", "Ahorro e inversión", "Empresa (Starkum)", "Otros"];
+const PCATS = ["Ingresos", "Supermercado", "Restaurantes y comida", "Transporte y gasolina", "Vivienda", "Servicios (luz, agua, internet, celular)", "Salud y deporte", "Compras", "Entretenimiento", "Suscripciones", "Educación", "Viajes", "Familia y regalos", "Préstamos y créditos", "Efectivo (cajero)", "Trámites y legales", "Comisiones bancarias", "Impuestos", "Pago de tarjeta", "Transferencias", "Ahorro e inversión", "Empresa (Starkum)", "Otros"];
 const NOT_SPENDING = ["Pago de tarjeta", "Transferencias", "Ahorro e inversión", "Empresa (Starkum)", "Ingresos"];
+const SELF_RE = /jonth|caballero|withdrawal to|deposit from|transfer (to|from)|to (checking|savings)|from (checking|savings)|online banking transfer|internal transfer/i;
 const PRULES = [
-  ["Pago de tarjeta", /payment[\s\-–:]*thank you|internet payment|mobile payment|autopay|automatic payment|card payment|crd pmt|credit card payment|pago tarjeta|epayment|e-payment|online payment.*card/i],
+  ["Pago de tarjeta", /payment to chase card|chase credit crd|payment credit one|credit one bank.*payment|capital one.*(pymt|payment|mobile pmt)|discover.*(payment|pymt)|card payment|crd epay|payment[\s\-–:]*thank you|internet payment|mobile payment|autopay|automatic payment|card payment|crd pmt|credit card payment|pago tarjeta|epayment|e-payment|online payment.*card/i],
   ["Comisiones bancarias", /\bfee\b|interest charge|overdraft|maintenance|service charge|comisi[oó]n|cuota de manejo/i],
   ["Impuestos", /\birs\b|treas tax|tax pymt|dept of revenue|dian\b/i],
-  ["Transferencias", /zelle|venmo|cash app|paypal|transfer|xfer|wise\b|remitly|western union|nequi|daviplata/i],
+  ["Préstamos y créditos", /westlake|oportun|\bloan\b|lendingclub|upstart|affirm|klarna|afterpay|financ/i],
+  ["Transferencias", /zelle|\bzel\b|venmo|cash app|paypal|transfer|xfer|wise\b|remitly|western union|nequi|daviplata/i],
+  ["Efectivo (cajero)", /\batm\b|cash withdrawal|retiro cajero/i],
+  ["Trámites y legales", /corporate filings|secretary of state|registered agent|notary|spantran|uscis|passport|dmv|cyberdrive/i],
   ["Suscripciones", /netflix|spotify|hulu|disney|hbo|max\.com|youtube|apple\.com\/bill|icloud|google \*|chatgpt|openai|anthropic|claude\.ai|adobe|canva|microsoft|prime video|paramount|peacock/i],
   ["Supermercado", /jewel|aldi|walmart|costco|target|whole foods|trader joe|mariano|kroger|meijer|sam'?s club|fresh market|\bd1\b|[ée]xito|carulla|olimpica|tiendas ara/i],
   ["Restaurantes y comida", /mcdonald|starbucks|dunkin|chipotle|subway|taco|pizza|burger|restaurant|cafe|coffee|doordash|uber \*?eats|grubhub|kfc|wendy|panera|chick-fil|popeyes|rappi/i],
-  ["Transporte y gasolina", /shell|\bbp\b|exxon|mobil|chevron|speedway|marathon|citgo|\buber\b|lyft|ventra|metra|\bcta\b|parking|toll|ipass|terpel|gasolin/i],
+  ["Transporte y gasolina", /ebike|lime\b|divvy|bird rides|shell|\bbp\b|exxon|mobil|chevron|speedway|marathon|citgo|\buber\b|lyft|ventra|metra|\bcta\b|parking|toll|ipass|terpel|gasolin/i],
   ["Vivienda", /\brent\b|apartment|mortgage|\bhoa\b|property mgmt|arriendo/i],
-  ["Servicios (luz, agua, internet, celular)", /comed|nicor|peoples gas|water|t-mobile|verizon|at&t|xfinity|comcast|spectrum|electric|claro|movistar|tigo|\bepm\b|mint mobile/i],
-  ["Salud", /cvs|walgreens|pharmacy|clinic|hospital|dental|medical|doctor|farmacia|eps\b/i],
+  ["Servicios (luz, agua, internet, celular)", /comed|nicor|peoples ?gas|wecenergy|village of|vzwrlss|water|t-mobile|verizon|at&t|xfinity|comcast|spectrum|electric|claro|movistar|tigo|\bepm\b|mint mobile/i],
+  ["Salud y deporte", /cvs|walgreens|pharmacy|clinic|hospital|dental|medical|doctor|farmacia|eps\b|fitness|planet fit|\bgym\b/i],
   ["Viajes", /airline|american air|united air|delta air|southwest|spirit air|avianca|latam|hotel|airbnb|expedia|booking\.com|marriott|hilton/i],
   ["Educación", /universidad|tuition|udemy|coursera|unimagdalena|college/i],
   ["Entretenimiento", /cinema|\bamc\b|steam|playstation|xbox|nintendo|ticketmaster|concert/i],
-  ["Compras", /amazon|amzn|ebay|best buy|home depot|lowe'?s|ikea|shein|temu|mercadolibre|etsy|macy|kohl/i],
+  ["Compras", /amazon|amzn|ebay|best buy|home depot|lowe'?s|ikea|shein|temu|mercadolibre|etsy|macy|kohl|alibaba|aliexpress|apple\.com|apple com|wholesale|bulk depot|cosmetic|checkcard|purchase|\bpos\b|sq \*|\bsp /i],
 ];
 const merchantKey = (d) => String(d || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[0-9#*.,\/\\-]+/g, " ").replace(/\b(pos|purchase|debit|card|visa|recurring|online|www|com|inc|llc)\b/g, " ").replace(/\s+/g, " ").trim().split(" ").slice(0, 3).join(" ");
 function autoCategory(desc, amount, rules) {
   const key = merchantKey(desc);
   const r = rules.find((x) => key && (key === x.pattern || key.startsWith(x.pattern) || x.pattern.startsWith(key)));
   if (r) return r.category;
-  if (amount > 0) { if (PRULES[0][1].test(desc)) return "Pago de tarjeta"; if (PRULES[3][1].test(desc)) return "Transferencias"; return "Ingresos"; }
+  if (SELF_RE.test(desc)) return "Transferencias";
+  const card = PRULES.find((x) => x[0] === "Pago de tarjeta")[1], tr = PRULES.find((x) => x[0] === "Transferencias")[1];
+  if (amount > 0) { if (card.test(desc)) return "Pago de tarjeta"; if (/refund|reembolso|return/i.test(desc)) return "Compras"; if (tr.test(desc)) return "Transferencias"; return "Ingresos"; }
   for (const [c, re] of PRULES) if (re.test(desc)) return c;
   return "Otros";
 }
 async function categorizePersonal(env) {
+  if (!(await env.DB.prepare("SELECT value FROM settings WHERE key = 'pcat_v2'").first())) {
+    await env.DB.prepare("UPDATE bank_lines SET category = NULL WHERE entity_id = 'personal' AND cat_manual = 0 AND COALESCE(status, '') != 'empresa'").run();
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('pcat_v2', ?)").bind(now()).run();
+  }
   const rows = (await env.DB.prepare("SELECT id, description, amount FROM bank_lines WHERE entity_id = 'personal' AND category IS NULL LIMIT 2000").all()).results;
   if (!rows.length) return;
   const rules = (await env.DB.prepare("SELECT pattern, category FROM p_rules").all()).results;
@@ -1560,7 +1571,7 @@ async function api(req, env, url, user) {
     if (!PCATS.includes(b.category)) return fail("Categoría no válida.");
     const l = await env.DB.prepare("SELECT description FROM bank_lines WHERE id = ? AND entity_id = 'personal'").bind(mm[1]).first();
     if (!l) return fail("Movimiento no encontrado.", 404);
-    await env.DB.prepare("UPDATE bank_lines SET category = ? WHERE id = ?").bind(b.category, mm[1]).run();
+    await env.DB.prepare("UPDATE bank_lines SET category = ?, cat_manual = 1 WHERE id = ?").bind(b.category, mm[1]).run();
     let same = 0;
     if (b.learn) {
       const key = merchantKey(l.description);
