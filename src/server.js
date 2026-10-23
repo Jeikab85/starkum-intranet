@@ -346,25 +346,27 @@ const PRULES = [
   ["Compras", /amazon|amzn|ebay|best buy|home depot|lowe'?s|ikea|shein|temu|mercadolibre|etsy|macy|kohl|alibaba|aliexpress|apple\.com|apple com|wholesale|bulk depot|cosmetic|checkcard|purchase|\bpos\b|sq \*|\bsp /i],
 ];
 const merchantKey = (d) => String(d || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[0-9#*.,\/\\-]+/g, " ").replace(/\b(pos|purchase|debit|card|visa|recurring|online|www|com|inc|llc)\b/g, " ").replace(/\s+/g, " ").trim().split(" ").slice(0, 3).join(" ");
-function autoCategory(desc, amount, rules) {
+function autoCategory(desc, amount, rules, cardType) {
   const key = merchantKey(desc);
   const r = rules.find((x) => key && (key === x.pattern || key.startsWith(x.pattern) || x.pattern.startsWith(key)));
   if (r) return r.category;
   if (SELF_RE.test(desc)) return "Transferencias";
+  // En una tarjeta de crédito, lo que entra es un pago a la tarjeta, una devolución o una recompensa; nunca un ingreso
+  if (cardType === "credito" && amount > 0) return /refund|return|reembolso|devoluci/i.test(desc) ? "Compras" : /reward|cash ?back|statement credit|bonus/i.test(desc) ? "Ingresos" : "Pago de tarjeta";
   const card = PRULES.find((x) => x[0] === "Pago de tarjeta")[1], tr = PRULES.find((x) => x[0] === "Transferencias")[1];
   if (amount > 0) { if (card.test(desc)) return "Pago de tarjeta"; if (/refund|reembolso|return/i.test(desc)) return "Compras"; if (tr.test(desc)) return "Transferencias"; return "Ingresos"; }
   for (const [c, re] of PRULES) if (re.test(desc)) return c;
   return "Otros";
 }
 async function categorizePersonal(env) {
-  if (!(await env.DB.prepare("SELECT value FROM settings WHERE key = 'pcat_v2'").first())) {
+  if (!(await env.DB.prepare("SELECT value FROM settings WHERE key = 'pcat_v3'").first())) {
     await env.DB.prepare("UPDATE bank_lines SET category = NULL WHERE entity_id = 'personal' AND cat_manual = 0 AND COALESCE(status, '') != 'empresa'").run();
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('pcat_v2', ?)").bind(now()).run();
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('pcat_v3', ?)").bind(now()).run();
   }
-  const rows = (await env.DB.prepare("SELECT id, description, amount FROM bank_lines WHERE entity_id = 'personal' AND category IS NULL LIMIT 2000").all()).results;
+  const rows = (await env.DB.prepare("SELECT bl.id, bl.description, bl.amount, c.card_type FROM bank_lines bl LEFT JOIN cards c ON c.id = bl.card_id WHERE bl.entity_id = 'personal' AND bl.category IS NULL LIMIT 3000").all()).results;
   if (!rows.length) return;
   const rules = (await env.DB.prepare("SELECT pattern, category FROM p_rules").all()).results;
-  const ups = rows.map((r) => env.DB.prepare("UPDATE bank_lines SET category = ? WHERE id = ?").bind(autoCategory(r.description, r.amount, rules), r.id));
+  const ups = rows.map((r) => env.DB.prepare("UPDATE bank_lines SET category = ? WHERE id = ?").bind(autoCategory(r.description, r.amount, rules, r.card_type), r.id));
   for (let i = 0; i < ups.length; i += 80) await env.DB.batch(ups.slice(i, i + 80));
 }
 // Cifrado de la URL de acceso de SimpleFIN con la clave secreta VAULT_KEY del Worker (nunca en texto plano)
@@ -1632,6 +1634,7 @@ async function api(req, env, url, user) {
   if (p === "/personal/sfin/map" && m === "POST") {
     const b = await body();
     if (!b.sfin_id) return fail("Falta la cuenta.");
+    if (b.purge) await env.DB.prepare("DELETE FROM bank_lines WHERE ext_id LIKE ?").bind(`sfin:${b.sfin_id}:%`).run();
     await env.DB.prepare("UPDATE cards SET sfin_id = NULL WHERE sfin_id = ?").bind(b.sfin_id).run();
     let cardId = b.card_id || null;
     if (!cardId && b.create) {
