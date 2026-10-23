@@ -855,6 +855,7 @@ async function cardsView(entityId) {
   };
   const entName = (id) => (state.entities.find((e) => e.id === id) || {}).name;
   return h("div", { class: "stack", style: "gap:14px" },
+    entityId === "personal" && cards.length ? balancesTable(cards) : "",
     h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, "Cada factura se asocia a la tarjeta con que pagaste. Se guardan solo el banco, la red, el tipo, el titular, los últimos 4 dígitos y el vencimiento: nunca el número completo, el código de seguridad ni la foto."),
       h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => cardDialog(null, entityId) }, "+ Agregar tarjeta")),
     cards.length ? h("div", { class: "stack", style: "gap:22px" }, byBank(cards).map(([bank, list]) => h("div", { class: "stack", style: "gap:12px" },
@@ -863,7 +864,7 @@ async function cardsView(entityId) {
       h("div", { class: "row between", style: "align-items:flex-start" },
         h("div", { class: "row", style: "gap:14px;align-items:center" }, h("div", { class: "cardchip" + (c.card_type === "debito" ? " debit" : ""), "aria-hidden": "true" }, h("span", null, (c.network || "Tarjeta") + " · " + (CTYPE[c.card_type] || "Crédito")), h("b", { class: "mono" }, "•••• " + c.last4)),
           h("div", { class: "stack", style: "gap:2px" }, h("b", { style: "font-size:17px" }, c.nickname),
-            h("span", { class: "small" }, `${c.uses.n} factura${c.uses.n === 1 ? "" : "s"} pagada${c.uses.n === 1 ? "" : "s"} con ella · ${money(c.uses.total)}`),
+            entityId === "personal" ? balanceLine(c) : h("span", { class: "small" }, `${c.uses.n} factura${c.uses.n === 1 ? "" : "s"} pagada${c.uses.n === 1 ? "" : "s"} con ella · ${money(c.uses.total)}`),
             !c.entity_id ? h("span", { class: "small muted" }, "Se usa en todas las empresas") : "")),
         h("div", { class: "row only-admin" }, entityId === "personal" && !c.sfin_id ? h("button", { class: "btn sm", type: "button", onclick: () => balanceDialog(c) }, "Actualizar saldo") : "", h("button", { class: "btn sm", type: "button", onclick: () => cardDialog(c, entityId) }, "Editar"),
           h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Eliminar tarjeta", `Se borra ${c.nickname} •••• ${c.last4} y sus estados de cuenta. Las facturas no se borran: quedan sin tarjeta asociada.`, async () => { await api("/cards/" + c.id, { method: "DELETE" }); toast("Tarjeta eliminada."); route(); }) }, "Eliminar"))),
@@ -1335,6 +1336,30 @@ function toCompanyDialog(x) {
       fld("Categoría en la empresa", h("select", { name: "category" }, (x.amount < 0 ? MOVE_CAT.gasto : MOVE_CAT.ingreso).map((c) => h("option", null, c))))),
     h("p", { class: "small muted", style: "margin:0" }, "Queda en \"Para el contador\" de la empresa como gasto pagado con tu cuenta personal, y deja de contar en tus gastos personales.")),
   async (fd) => { await api(`/personal/lines/${x.id}/company`, { method: "POST", body: Object.fromEntries(fd) }); toast("Pasado a la empresa."); route(); }, "Pasar");
+}
+function balanceText(c) {
+  if (c.balance == null) return "Sin saldo";
+  const debt = c.card_type !== "debito" && c.balance < 0;
+  return (debt ? "Debes " : "") + money(Math.abs(c.balance), c.currency || "USD");
+}
+function balanceLine(c) {
+  const debt = c.card_type !== "debito" && c.balance < 0;
+  return h("span", { class: "stack", style: "gap:0" },
+    h("b", { class: "mono", style: `font-size:22px;${debt ? "color:var(--warn)" : ""}` }, balanceText(c)),
+    h("span", { class: "small muted" }, c.balance == null ? (c.sfin_id ? "Sincroniza para traer el saldo" : "Actualízalo a mano o conéctala") : `${c.card_type === "debito" ? "Saldo" : "Saldo de la tarjeta"} al ${fdate(c.balance_at)}${c.sfin_id ? " · automático" : ""}${c.others_money ? " · no es tu dinero" : ""}`));
+}
+function balancesTable(cards) {
+  const mine = cards.filter((c) => !c.others_money);
+  const cash = mine.filter((c) => c.card_type === "debito").reduce((s2, c) => s2 + (Number(c.balance) || 0), 0);
+  const owed = mine.filter((c) => c.card_type !== "debito").reduce((s2, c) => s2 + Math.abs(Math.min(0, Number(c.balance) || 0)), 0);
+  return h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Saldos actuales"),
+      h("span", { class: "small" }, "Tuyo: ", h("b", { class: "mono" }, money(cash)), " en cuentas · ", h("b", { class: "mono", style: "color:var(--warn)" }, money(owed)), " de deuda · patrimonio ", h("b", { class: "mono" }, money(cash - owed)))),
+    h("div", { class: "tablewrap" }, h("table", { style: "min-width:560px" }, h("thead", null, h("tr", null, ["Cuenta", "Banco", "Tipo", "Saldo", "Actualizado"].map((t) => h("th", null, t)))),
+      h("tbody", null, byBank(cards).flatMap(([, list]) => list).map((c) => h("tr", { style: c.others_money ? "opacity:.65" : "" },
+        h("td", null, h("b", null, c.nickname), " ", h("span", { class: "muted small" }, "•••• " + c.last4), c.others_money ? [" ", pill("No es tu dinero", "info")] : ""),
+        h("td", { class: "small" }, bankOf(c.issuer)), h("td", { class: "small" }, CTYPE[c.card_type]),
+        h("td", { class: "mono", style: c.card_type !== "debito" && c.balance < 0 ? "color:var(--warn);font-weight:700" : "font-weight:700" }, balanceText(c)),
+        h("td", { class: "small muted" }, c.balance_at ? fdate(c.balance_at) : "—")))))));
 }
 function balanceDialog(c) {
   modal("Saldo de " + c.nickname, () => h("div", { class: "stack" },
