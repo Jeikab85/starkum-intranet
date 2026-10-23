@@ -1428,7 +1428,7 @@ async function sfinView() {
         sel.onchange = async () => { const v = sel.value; const body = { sfin_id: a.id };
           if (v.startsWith("new:")) { const [, e2, t] = v.split(":"); body.create = { entity_id: e2, card_type: t, nickname: a.name.slice(0, 60), issuer: a.org, last4: (a.name.match(/(\d{4})\D*$/) || [])[1] || "0000" }; } else body.card_id = v || null;
           await api("/personal/sfin/map", { method: "POST", body }); toast(v ? "Cuenta asignada. Sincroniza para traer sus movimientos." : "Cuenta sin asignar."); route(); };
-        return h("div", { class: "row between", style: "padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", { class: "stack", style: "gap:2px" }, h("span", null, h("b", null, a.name), a.is_new ? [" ", pill("Nueva", "ok")] : !a.card ? [" ", pill("Sin asignar")] : ""), h("span", { class: "small muted" }, `${a.org} · saldo ${money(Math.abs(a.balance || 0), a.currency || "USD")}`)), sel);
+        return h("div", { class: "row between", style: "padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", { class: "stack", style: "gap:2px" }, h("span", null, h("b", null, a.name), a.is_new ? [" ", pill("Nueva", "ok")] : !a.card ? [" ", pill("Sin asignar")] : ""), h("span", { class: "small muted" }, `${a.org} · ` + (a.balance < 0 ? `debes ${money(Math.abs(a.balance), a.currency || "USD")}` : `disponible ${money(a.available ? a.available : a.balance || 0, a.currency || "USD")}`))), sel);
       })),
       h("p", { class: "small muted", style: "margin:0" }, "Si una cuenta es de la empresa (por ejemplo, la Chase de Starkum), asígnala a la cuenta de la LLC: sus movimientos llegan solos a la conciliación del banco de la empresa."));
   }
