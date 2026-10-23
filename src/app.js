@@ -1264,15 +1264,16 @@ function personalSummary(d, month, year) {
   const usd = (v) => money(v, "USD");
   const mineAccts = d.accounts.filter((a) => !a.others_money);
   const debit = mineAccts.filter((a) => a.card_type === "debito"), credit = mineAccts.filter((a) => a.card_type !== "debito");
-  const cash = debit.reduce((s, a) => s + (Number(a.balance) || 0), 0), owed = credit.reduce((s, a) => s + Math.abs(Math.min(0, Number(a.balance) || 0)), 0);
-  const othersCash = d.accounts.filter((a) => a.others_money).reduce((s, a) => s + (Number(a.balance) || 0), 0);
+  const cash = debit.reduce((s, a) => s + (effBal(a) || 0), 0), owed = credit.reduce((s, a) => s + Math.abs(Math.min(0, Number(a.balance) || 0)), 0);
+  const othersCash = d.accounts.filter((a) => a.others_money).reduce((s, a) => s + (effBal(a) || 0), 0);
   const stat = (l, v, cls) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, l), h("br"), h("b", { style: cls || "" }, v));
   const label = year ? "del año" : "del mes";
   const base = "#/personal/resumen";
   const acctCard = (a) => h("section", { class: "card stack", style: "gap:8px" + (a.others_money ? ";border-style:dashed" : "") },
     h("span", { class: "stack", style: "gap:2px" }, h("span", { class: "row between", style: "gap:8px;flex-wrap:nowrap" }, h("b", null, a.nickname), a.others_money ? pill("No es tu dinero", "info") : ""), h("span", { class: "small muted" }, [bankOf(a.issuer), CTYPE[a.card_type], "•••• " + a.last4].join(" · "))),
-    h("div", { style: "padding:8px 10px;border-radius:10px;background:var(--line)" }, h("span", { class: "small muted" }, a.card_type === "debito" ? "Saldo actual" : "Deuda actual", a.balance_at ? " · al " + fdate(a.balance_at) : ""), h("br"),
-      h("b", { class: "mono", style: "font-size:20px;" + (a.card_type !== "debito" && a.balance < 0 ? "color:var(--warn)" : "") }, a.balance == null ? "—" : (a.card_type !== "debito" && a.balance < 0 ? "Debes " : "") + usd(Math.abs(a.balance)))),
+    h("div", { style: "padding:8px 10px;border-radius:10px;background:var(--line)" }, h("span", { class: "small muted" }, a.card_type === "debito" ? "Saldo disponible" : "Deuda actual", a.balance_at ? " · al " + fdate(a.balance_at) : ""), h("br"),
+      h("b", { class: "mono", style: "font-size:20px;" + (a.card_type !== "debito" && a.balance < 0 ? "color:var(--warn)" : "") }, balanceText(a)),
+      ledgerNote(a) ? h("div", { class: "small muted" }, ledgerNote(a)) : ""),
     h("span", { class: "small muted" }, year ? `Movimientos de ${year}:` : "Movimientos del mes:"),
     h("div", { class: "row small", style: "gap:14px;flex-wrap:wrap" }, h("span", null, "Entró ", h("b", { class: "mono", style: "color:var(--ok)" }, usd(a.in_total))), h("span", null, "Salió ", h("b", { class: "mono" }, usd(a.out_total))), h("span", { class: "muted" }, `${a.n} movimiento${a.n === 1 ? "" : "s"}`)),
     a.by_category.length ? h("span", { class: "small muted" }, "En qué: " + a.by_category.slice(0, 3).map((c) => `${c.category} ${usd(c.total)}`).join(" · ")) : "",
@@ -1339,28 +1340,33 @@ function toCompanyDialog(x) {
     h("p", { class: "small muted", style: "margin:0" }, "Queda en \"Para el contador\" de la empresa como gasto pagado con tu cuenta personal, y deja de contar en tus gastos personales.")),
   async (fd) => { await api(`/personal/lines/${x.id}/company`, { method: "POST", body: Object.fromEntries(fd) }); toast("Pasado a la empresa."); route(); }, "Pasar");
 }
+// En cuentas de débito se muestra el saldo disponible (como la app del banco); en tarjetas, la deuda
+const effBal = (c) => (c.card_type === "debito" && c.available != null && Number(c.available) !== 0 ? Number(c.available) : c.balance == null ? null : Number(c.balance));
+const ledgerNote = (c) => (c.card_type === "debito" && c.available != null && Number(c.available) !== 0 && c.balance != null && Math.abs(Number(c.available) - Number(c.balance)) > 0.009 ? `Saldo contable ${money(c.balance, c.currency || "USD")} (hay movimientos por registrarse)` : "");
 function balanceText(c) {
-  if (c.balance == null) return "Sin saldo";
-  const debt = c.card_type !== "debito" && c.balance < 0;
-  return (debt ? "Debes " : "") + money(Math.abs(c.balance), c.currency || "USD");
+  const b = effBal(c);
+  if (b == null) return "Sin saldo";
+  const debt = c.card_type !== "debito" && b < 0;
+  return (debt ? "Debes " : "") + money(Math.abs(b), c.currency || "USD");
 }
 function balanceLine(c) {
   const debt = c.card_type !== "debito" && c.balance < 0;
   return h("span", { class: "stack", style: "gap:0" },
     h("b", { class: "mono", style: `font-size:22px;${debt ? "color:var(--warn)" : ""}` }, balanceText(c)),
-    h("span", { class: "small muted" }, c.balance == null ? (c.sfin_id ? "Sincroniza para traer el saldo" : "Actualízalo a mano o conéctala") : `${c.card_type === "debito" ? "Saldo" : "Saldo de la tarjeta"} al ${fdate(c.balance_at)}${c.sfin_id ? " · automático" : ""}${c.others_money ? " · no es tu dinero" : ""}`));
+    h("span", { class: "small muted" }, c.balance == null ? (c.sfin_id ? "Sincroniza para traer el saldo" : "Actualízalo a mano o conéctala") : `${c.card_type === "debito" ? "Saldo disponible" : "Saldo de la tarjeta"} al ${fdate(c.balance_at)}${c.sfin_id ? " · automático" : ""}${c.others_money ? " · no es tu dinero" : ""}`),
+    ledgerNote(c) ? h("span", { class: "small muted" }, ledgerNote(c)) : "");
 }
 function balancesTable(cards) {
   const mine = cards.filter((c) => !c.others_money);
-  const cash = mine.filter((c) => c.card_type === "debito").reduce((s2, c) => s2 + (Number(c.balance) || 0), 0);
+  const cash = mine.filter((c) => c.card_type === "debito").reduce((s2, c) => s2 + (effBal(c) || 0), 0);
   const owed = mine.filter((c) => c.card_type !== "debito").reduce((s2, c) => s2 + Math.abs(Math.min(0, Number(c.balance) || 0)), 0);
   return h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Saldos actuales"),
       h("span", { class: "small" }, "Tuyo: ", h("b", { class: "mono" }, money(cash)), " en cuentas · ", h("b", { class: "mono", style: "color:var(--warn)" }, money(owed)), " de deuda · patrimonio ", h("b", { class: "mono" }, money(cash - owed)))),
-    h("div", { class: "tablewrap" }, h("table", { style: "min-width:560px" }, h("thead", null, h("tr", null, ["Cuenta", "Banco", "Tipo", "Saldo", "Actualizado"].map((t) => h("th", null, t)))),
+    h("div", { class: "tablewrap" }, h("table", { style: "min-width:560px" }, h("thead", null, h("tr", null, ["Cuenta", "Banco", "Tipo", "Saldo disponible / deuda", "Actualizado"].map((t) => h("th", null, t)))),
       h("tbody", null, byBank(cards).flatMap(([, list]) => list).map((c) => h("tr", { style: c.others_money ? "opacity:.65" : "" },
         h("td", null, h("b", null, c.nickname), " ", h("span", { class: "muted small" }, "•••• " + c.last4), c.others_money ? [" ", pill("No es tu dinero", "info")] : ""),
         h("td", { class: "small" }, bankOf(c.issuer)), h("td", { class: "small" }, CTYPE[c.card_type]),
-        h("td", { class: "mono", style: c.card_type !== "debito" && c.balance < 0 ? "color:var(--warn);font-weight:700" : "font-weight:700" }, balanceText(c)),
+        h("td", { class: "mono", style: c.card_type !== "debito" && c.balance < 0 ? "color:var(--warn);font-weight:700" : "font-weight:700" }, balanceText(c), ledgerNote(c) ? h("div", { class: "small muted", style: "font-weight:400" }, "contable " + money(c.balance)) : ""),
         h("td", { class: "small muted" }, c.balance_at ? fdate(c.balance_at) : "—")))))));
 }
 function balanceDialog(c) {
