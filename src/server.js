@@ -29,7 +29,7 @@ const MIGRATIONS = [
   "CREATE INDEX IF NOT EXISTS bank_ext ON bank_lines(ext_id)",
   "ALTER TABLE cards ADD COLUMN others_money INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE bank_lines ADD COLUMN cat_manual INTEGER NOT NULL DEFAULT 0",
-  "ALTER TABLE cards ADD COLUMN available REAL", "ALTER TABLE cards ADD COLUMN bank_balance_at TEXT", "ALTER TABLE cards ADD COLUMN hide_summary INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE cards ADD COLUMN available REAL", "ALTER TABLE cards ADD COLUMN bank_balance_at TEXT", "ALTER TABLE cards ADD COLUMN hide_summary INTEGER NOT NULL DEFAULT 0", "ALTER TABLE cards ADD COLUMN money_owner TEXT", "ALTER TABLE bank_lines ADD COLUMN owner TEXT",
   "CREATE TABLE IF NOT EXISTS p_rules (id TEXT PRIMARY KEY, pattern TEXT NOT NULL UNIQUE, category TEXT NOT NULL, created_at TEXT NOT NULL)",
   "INSERT OR IGNORE INTO entities (id, name, country, details) VALUES ('personal', 'Personal', 'Solo para ti', '{}')",
   "UPDATE suppliers SET kind = 'Herramientas/Suscripciones', status = COALESCE(NULLIF(status,'investigar'), 'activo') WHERE id IN (SELECT supplier_id FROM invoices WHERE kind = 'suscripción' AND supplier_id IS NOT NULL) AND COALESCE(kind, 'Otro') = 'Otro'",
@@ -359,7 +359,23 @@ function autoCategory(desc, amount, rules, cardType) {
   for (const [c, re] of PRULES) if (re.test(desc)) return c;
   return "Otros";
 }
+// Personas dueñas del dinero en el espacio personal ("personal" = Jonth; "starkum" = pasado a la empresa)
+const DEFAULT_PEOPLE = [{ id: "dayana", name: "Dayana" }, { id: "bryan", name: "Bryan" }];
+async function getPeople(env) {
+  const v = (await env.DB.prepare("SELECT value FROM settings WHERE key = 'p_people'").first())?.value;
+  return v ? JSON.parse(v) : DEFAULT_PEOPLE;
+}
+// Una sola vez: la Chase (dinero de Dayana) y la Bank of America (dinero de Bryan)
+async function seedOwners(env) {
+  if (await env.DB.prepare("SELECT value FROM settings WHERE key = 'owners_v1'").first()) return;
+  await env.DB.batch([
+    env.DB.prepare("UPDATE cards SET money_owner = 'dayana' WHERE others_money = 1 AND money_owner IS NULL AND (issuer LIKE '%Chase%' OR nickname LIKE '%Chase%' OR nickname LIKE '%TOTAL CHECKING%')"),
+    env.DB.prepare("UPDATE cards SET money_owner = 'bryan' WHERE others_money = 1 AND money_owner IS NULL AND (issuer LIKE '%America%' OR nickname LIKE '%Bank of America%' OR nickname LIKE '%Adv Plus%')"),
+    env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('owners_v1', ?)").bind(now()),
+  ]);
+}
 async function categorizePersonal(env) {
+  await seedOwners(env);
   if (!(await env.DB.prepare("SELECT value FROM settings WHERE key = 'pcat_v3'").first())) {
     await env.DB.prepare("UPDATE bank_lines SET category = NULL WHERE entity_id = 'personal' AND cat_manual = 0 AND COALESCE(status, '') != 'empresa'").run();
     await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('pcat_v3', ?)").bind(now()).run();
@@ -1559,21 +1575,26 @@ async function api(req, env, url, user) {
       lines.results = lines.results.filter((l) => !hidden.has(l.card_id));
       cycles.results = cycles.results.filter((c) => !hidden.has(c.card_id));
     }
-    const others = new Set(accts.results.filter((a) => a.others_money).map((a) => a.id));
-    const all = [...lines.results.map((l) => ({ kind: "banco", id: l.id, date: l.posted_on, desc: l.description, amount: l.amount, category: l.category || "Otros", card: l.card ? `${l.card} •••• ${l.last4}` : "", card_id: l.card_id, others: others.has(l.card_id), status: l.status, pending: l.pending })),
-      ...moves.results.map((x) => ({ kind: "manual", id: x.id, date: x.moved_on, desc: x.concept, amount: x.kind === "ingreso" ? x.amount : -x.amount, category: x.category || (x.kind === "ingreso" ? "Ingresos" : "Otros"), card: "" }))];
+    const people = await getPeople(env);
+    const acctOwner = Object.fromEntries(accts.results.map((a) => [a.id, a.money_owner || (a.others_money ? "otro" : "personal")]));
+    const lineOwner = (l) => (l.status === "empresa" ? "starkum" : l.owner || acctOwner[l.card_id] || "personal");
+    const all = [...lines.results.map((l) => { const ow = lineOwner(l); return { kind: "banco", id: l.id, date: l.posted_on, desc: l.description, amount: l.amount, category: l.category || "Otros", card: l.card ? `${l.card} •••• ${l.last4}` : "", card_id: l.card_id, owner: ow, owner_default: acctOwner[l.card_id] || "personal", others: ow !== "personal", status: l.status, pending: l.pending }; }),
+      ...moves.results.map((x) => ({ kind: "manual", id: x.id, date: x.moved_on, desc: x.concept, amount: x.kind === "ingreso" ? x.amount : -x.amount, category: x.category || (x.kind === "ingreso" ? "Ingresos" : "Otros"), card: "", owner: "personal" }))];
     // Totales: "lo tuyo" excluye las cuentas cuyo dinero no es tuyo; "general" las incluye
     const tally = (list) => { const byCat = {}; let income = 0, spend = 0;
       for (const x of list) { if (x.status === "empresa") continue;
         if (x.category === "Ingresos" && x.amount > 0) income += x.amount;
         else if (!NOT_SPENDING.includes(x.category)) { spend += -x.amount; byCat[x.category] = (byCat[x.category] || 0) - x.amount; } }
       return { income: Math.round(income * 100) / 100, spend: Math.round(spend * 100) / 100, by_category: Object.entries(byCat).map(([k, v]) => ({ category: k, total: Math.round(v * 100) / 100 })).filter((c) => c.total > 0.004).sort((a, z) => z.total - a.total) }; };
-    const mine = tally(all.filter((x) => !x.others)), general = tally(all);
+    const mine = tally(all.filter((x) => x.owner === "personal")), general = tally(all);
+    const byPerson = people.map((pp) => { const accs = accts.results.filter((a) => acctOwner[a.id] === pp.id); const l = all.filter((x) => x.owner === pp.id);
+      return { ...pp, n: l.length, cash: Math.round(accs.reduce((s2, a) => s2 + (Number(a.card_type === "debito" && a.available ? a.available : a.balance) || 0), 0) * 100) / 100, accounts: accs.map((a) => a.nickname), ...tally(l) }; });
+    const starkum = all.filter((x) => x.owner === "starkum"); const toStarkum = Math.round(starkum.reduce((s2, x) => s2 - x.amount, 0) * 100) / 100;
     const income = mine.income, spend = mine.spend; const byCat = Object.fromEntries(mine.by_category.map((c) => [c.category, c.total]));
     const perAccount = accts.results.map((a) => { const l = all.filter((x) => x.card_id === a.id); const t = tally(l);
       return { id: a.id, nickname: a.nickname, issuer: a.issuer, last4: a.last4, card_type: a.card_type, others_money: !!a.others_money, balance: a.balance, available: a.available, balance_at: a.balance_at, n: l.length, in_total: Math.round(l.filter((x) => x.amount > 0).reduce((s2, x) => s2 + x.amount, 0) * 100) / 100, out_total: Math.round(l.filter((x) => x.amount < 0).reduce((s2, x) => s2 - x.amount, 0) * 100) / 100, ...t }; });
     const sMap = Object.fromEntries(st.results.map((r) => [r.key, r.value]));
-    return json({ month, year: yr, from, to, accounts: accts.results, per_account: perAccount, general, items: all.sort((a, z) => z.date.localeCompare(a.date)).slice(0, yr ? 3000 : 600), by_category: Object.entries(byCat).map(([k, v]) => ({ category: k, total: Math.round(v * 100) / 100 })).filter((x) => x.total > 0.004).sort((a, z) => z.total - a.total),
+    return json({ month, year: yr, from, to, accounts: accts.results.map((a) => ({ ...a, money_owner: acctOwner[a.id] })), per_account: perAccount.map((a) => ({ ...a, money_owner: acctOwner[a.id] })), general, people, by_person: byPerson, starkum: { n: starkum.length, total: toStarkum }, items: all.sort((a, z) => z.date.localeCompare(a.date)).slice(0, yr ? 3000 : 600), by_category: Object.entries(byCat).map(([k, v]) => ({ category: k, total: Math.round(v * 100) / 100 })).filter((x) => x.total > 0.004).sort((a, z) => z.total - a.total),
       income: Math.round(income * 100) / 100, spend: Math.round(spend * 100) / 100, due: cycles.results, sub_charges: subs.results.flatMap((s) => subCharges(s, from, to).map((d) => ({ date: d, name: s.name, amount: s.amount, currency: s.currency }))),
       categories: PCATS, sfin: { connected: !!sMap.sfin_access, vault: !!(await vaultKey(env)), status: sMap.sfin_status ? JSON.parse(sMap.sfin_status) : null } });
   }
@@ -1601,10 +1622,36 @@ async function api(req, env, url, user) {
     if (!["llc", "sas"].includes(b.entity_id)) return fail("Elige la empresa.");
     const l = await env.DB.prepare("SELECT * FROM bank_lines WHERE id = ? AND entity_id = 'personal'").bind(mm[1]).first();
     if (!l) return fail("Movimiento no encontrado.", 404);
-    const out = l.amount < 0;
+    const out = l.amount < 0; const moveId = uid();
     await env.DB.prepare("INSERT INTO money_moves (id, entity_id, kind, moved_on, amount, currency, concept, category, notes, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-      .bind(uid(), b.entity_id, out ? "gasto" : "ingreso", l.posted_on, Math.abs(l.amount), "USD", l.description.slice(0, 200), b.category || (out ? "Otros gastos" : "Otros ingresos"), out ? "Pagado con una cuenta personal: el contador lo registra como aporte del dueño." : "Recibido en una cuenta personal.", user.email, now()).run();
-    await env.DB.prepare("UPDATE bank_lines SET category = 'Empresa (Starkum)', status = 'empresa', locked = 1, match_label = ? WHERE id = ?").bind("Registrado en " + (b.entity_id === "llc" ? "Starkum Holdings LLC" : "Starkum Group SAS"), mm[1]).run();
+      .bind(moveId, b.entity_id, out ? "gasto" : "ingreso", l.posted_on, Math.abs(l.amount), "USD", l.description.slice(0, 200), b.category || (out ? "Otros gastos" : "Otros ingresos"), out ? "Pagado con una cuenta personal: el contador lo registra como aporte del dueño." : "Recibido en una cuenta personal.", user.email, now()).run();
+    await env.DB.prepare("UPDATE bank_lines SET category = 'Empresa (Starkum)', status = 'empresa', locked = 1, owner = 'starkum', match_kind = 'p_company', match_id = ?, match_label = ? WHERE id = ?").bind(moveId, "Registrado en " + (b.entity_id === "llc" ? "Starkum Holdings LLC" : "Starkum Group SAS"), mm[1]).run();
+    return json({ ok: true });
+  }
+  // De quién es un movimiento: personal (Jonth), Dayana, Bryan… (Starkum va por /company)
+  if ((mm = p.match(/^\/personal\/lines\/([\w-]+)\/owner$/)) && m === "PUT") {
+    const b = await body(); const people = await getPeople(env);
+    if (b.owner !== "personal" && !people.some((x) => x.id === b.owner)) return fail("Persona no válida.");
+    const l = await env.DB.prepare("SELECT bl.*, c.money_owner, c.others_money FROM bank_lines bl LEFT JOIN cards c ON c.id = bl.card_id WHERE bl.id = ? AND bl.entity_id = 'personal'").bind(mm[1]).first();
+    if (!l) return fail("Movimiento no encontrado.", 404);
+    const q = [];
+    // Si estaba pasado a la empresa, se deshace: se borra el registro que se creó en la empresa
+    if (l.status === "empresa") {
+      if (l.match_kind === "p_company" && l.match_id) q.push(env.DB.prepare("DELETE FROM money_moves WHERE id = ?").bind(l.match_id));
+      else q.push(env.DB.prepare("DELETE FROM money_moves WHERE id = (SELECT id FROM money_moves WHERE entity_id IN ('llc','sas') AND moved_on = ? AND amount = ? AND concept = ? AND notes LIKE '%cuenta personal%' LIMIT 1)").bind(l.posted_on, Math.abs(l.amount), l.description.slice(0, 200)));
+      q.push(env.DB.prepare("UPDATE bank_lines SET status = 'sin_soporte', locked = 0, match_kind = NULL, match_id = NULL, match_label = NULL, category = NULL, cat_manual = 0 WHERE id = ?").bind(mm[1]));
+    }
+    const def = l.money_owner || "personal";
+    q.push(env.DB.prepare("UPDATE bank_lines SET owner = ? WHERE id = ?").bind(b.owner === def ? null : b.owner, mm[1]));
+    await env.DB.batch(q);
+    return json({ ok: true, undone: l.status === "empresa" });
+  }
+  // De quién es el dinero de una cuenta (lo que entra y sale de ella se asigna a esa persona por defecto)
+  if (p === "/personal/people" && m === "GET") return json({ people: await getPeople(env) });
+  if ((mm = p.match(/^\/personal\/accounts\/([\w-]+)\/owner$/)) && m === "PUT") {
+    const b = await body(); const people = await getPeople(env);
+    if (b.owner !== "personal" && !people.some((x) => x.id === b.owner)) return fail("Persona no válida.");
+    await env.DB.prepare("UPDATE cards SET money_owner = ?, others_money = ? WHERE id = ?").bind(b.owner, b.owner === "personal" ? 0 : 1, mm[1]).run();
     return json({ ok: true });
   }
   if ((mm = p.match(/^\/personal\/accounts\/([\w-]+)\/visible$/)) && m === "PUT") {
@@ -1614,7 +1661,7 @@ async function api(req, env, url, user) {
   }
   if ((mm = p.match(/^\/personal\/accounts\/([\w-]+)\/others$/)) && m === "PUT") {
     const b = await body();
-    await env.DB.prepare("UPDATE cards SET others_money = ? WHERE id = ?").bind(b.others ? 1 : 0, mm[1]).run();
+    await env.DB.prepare("UPDATE cards SET others_money = ?, money_owner = ? WHERE id = ?").bind(b.others ? 1 : 0, b.others ? null : "personal", mm[1]).run();
     return json({ ok: true });
   }
   if ((mm = p.match(/^\/personal\/accounts\/([\w-]+)\/balance$/)) && m === "PUT") {

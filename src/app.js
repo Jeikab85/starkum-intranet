@@ -851,7 +851,8 @@ async function cardsView(entityId) {
       kv("Es de", c.owner === "empresa" ? "La empresa" : "Uso personal"), c.notes ? kv("Notas", c.notes) : "",
       c.balance != null ? kv(c.card_type === "debito" ? "Saldo" : "Saldo de la tarjeta", (c.card_type !== "debito" && c.balance < 0 ? "Debes " : "") + money(Math.abs(c.balance), c.currency || "USD") + (c.balance_at ? ` · ${fdate(c.balance_at)}` : "")) : "",
       c.sfin_id ? kv("Conexión", "Automática (SimpleFIN)") : "",
-      entityId === "personal" ? h("div", null, h("span", null, "¿Es tu dinero?"), h("label", { class: "row", style: "gap:6px;margin-top:4px" }, h("input", { type: "checkbox", checked: !!c.others_money, style: "width:auto", onchange: async (e) => { await api(`/personal/accounts/${c.id}/others`, { method: "PUT", body: { others: e.target.checked } }); toast(e.target.checked ? "Marcada: no cuenta en tu patrimonio ni en tus gastos." : "Marcada como tuya."); route(); } }), h("span", { class: "small" }, "El dinero de esta cuenta no es mío"))) : "");
+      entityId === "personal" ? h("div", null, h("span", null, "¿De quién es el dinero?"), h("select", { style: "width:auto;margin-top:4px", "aria-label": "Dueño del dinero de esta cuenta", onchange: async (e) => { const v = e.target.value; await api(`/personal/accounts/${c.id}/owner`, { method: "PUT", body: { owner: v } }); toast(v === "personal" ? "Marcada como tuya." : `Marcada como dinero de ${ownerName(v, state.people)}: sus movimientos son de esa persona salvo que cambies alguno.`); route(); } },
+        ownerList(state.people).filter(([k]) => k !== "starkum").map(([k, l]) => h("option", { value: k, selected: k === (c.money_owner || (c.others_money ? "" : "personal")) }, l)), !c.money_owner && c.others_money ? h("option", { value: "", selected: true, disabled: true }, "Otra persona (elige quién)") : "")) : "");
   };
   const entName = (id) => (state.entities.find((e) => e.id === id) || {}).name;
   return h("div", { class: "stack", style: "gap:14px" },
@@ -1245,7 +1246,7 @@ async function pagePersonal(tab, q) {
   const month = /^\d{4}-\d{2}$/.test(q.get("mes") || "") ? q.get("mes") : new Date().toISOString().slice(0, 7);
   const year = /^\d{4}$/.test(q.get("anio") || "") ? q.get("anio") : null;
   let content;
-  if (tab === "cuentas") content = await cardsView("personal");
+  if (tab === "cuentas") { state.people = (await api("/personal/people").catch(() => ({ people: [] }))).people; content = await cardsView("personal"); }
   else if (tab === "suscripciones") content = await subsView(ent, null, q);
   else if (tab === "conexion") content = await sfinView();
   else {
@@ -1262,15 +1263,15 @@ function catBars(list, usd) {
 }
 function personalSummary(d, month, year) {
   const usd = (v) => money(v, "USD");
-  const mineAccts = d.accounts.filter((a) => !a.others_money);
+  const mineAccts = d.accounts.filter((a) => (a.money_owner || "personal") === "personal");
   const debit = mineAccts.filter((a) => a.card_type === "debito"), credit = mineAccts.filter((a) => a.card_type !== "debito");
   const cash = debit.reduce((s, a) => s + (effBal(a) || 0), 0), owed = credit.reduce((s, a) => s + Math.abs(Math.min(0, Number(a.balance) || 0)), 0);
-  const othersCash = d.accounts.filter((a) => a.others_money).reduce((s, a) => s + (effBal(a) || 0), 0);
+  const othersCash = d.accounts.filter((a) => (a.money_owner || "personal") !== "personal").reduce((s, a) => s + (effBal(a) || 0), 0);
   const stat = (l, v, cls) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, l), h("br"), h("b", { style: cls || "" }, v));
   const label = year ? "del año" : "del mes";
   const base = "#/personal/resumen";
   const acctCard = (a) => h("section", { class: "card stack", style: "gap:8px" + (a.others_money ? ";border-style:dashed" : "") },
-    h("span", { class: "stack", style: "gap:2px" }, h("span", { class: "row between", style: "gap:8px;flex-wrap:nowrap" }, h("b", null, a.nickname), a.others_money ? pill("No es tu dinero", "info") : ""), h("span", { class: "small muted" }, [bankOf(a.issuer), CTYPE[a.card_type], "•••• " + a.last4].join(" · "))),
+    h("span", { class: "stack", style: "gap:2px" }, h("span", { class: "row between", style: "gap:8px;flex-wrap:nowrap" }, h("b", null, a.nickname), a.money_owner && a.money_owner !== "personal" ? pill("Dinero de " + ownerName(a.money_owner, d.people), "info") : ""), h("span", { class: "small muted" }, [bankOf(a.issuer), CTYPE[a.card_type], "•••• " + a.last4].join(" · "))),
     h("div", { style: "padding:8px 10px;border-radius:10px;background:var(--line)" }, h("span", { class: "small muted" }, a.card_type === "debito" ? "Saldo disponible" : "Deuda actual", a.balance_at ? " · al " + fdate(a.balance_at) : ""), h("br"),
       h("b", { class: "mono", style: "font-size:20px;" + (a.card_type !== "debito" && a.balance < 0 ? "color:var(--warn)" : "") }, balanceText(a)),
       ledgerNote(a) ? h("div", { class: "small muted" }, ledgerNote(a)) : ""),
@@ -1283,7 +1284,7 @@ function personalSummary(d, month, year) {
       h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog({ id: "personal", name: "Personal" }) }, "Leer extracto"),
       h("button", { class: "btn primary sm", type: "button", onclick: () => personalMoveDialog(d.categories) }, "+ Movimiento manual"))),
     !d.sfin.connected ? h("section", { class: "card row between" }, h("span", { class: "small" }, "Conecta tus bancos para que los movimientos y saldos lleguen solos todos los días."), h("a", { class: "btn sm", href: "#/personal/conexion" }, "Conectar bancos")) : "",
-    h("h2", { style: "margin:0" }, "Lo tuyo", h("span", { class: "small muted", style: "font-weight:400" }, " · sin las cuentas cuyo dinero no es tuyo")),
+    h("h2", { style: "margin:0" }, "Lo tuyo", h("span", { class: "small muted", style: "font-weight:400" }, " · solo los movimientos marcados como tuyos")),
     h("div", { class: "grid g4" }, stat("Patrimonio (cuentas − tarjetas)", usd(cash - owed), cash - owed < 0 ? "color:var(--bad)" : ""), stat("Disponible en tus cuentas", usd(cash)), stat("Debes en tarjetas", usd(owed), owed ? "color:var(--warn)" : ""), stat("Ahorro " + label, usd(d.income - d.spend), d.income - d.spend < 0 ? "color:var(--bad)" : "color:var(--ok)")),
     h("div", { class: "grid g4" }, stat("Ingresos " + label, usd(d.income)), stat("Gastos " + label, usd(d.spend)), stat("Suscripciones " + label, usd(d.sub_charges.reduce((s, x) => s + (x.currency === "USD" ? x.amount : 0), 0))), stat("Promedio de gasto al mes", usd(year ? d.spend / Math.max(1, Number(year) === new Date().getFullYear() ? new Date().getMonth() + 1 : 12) : d.spend))),
     h("div", { class: "split" },
@@ -1291,29 +1292,51 @@ function personalSummary(d, month, year) {
       h("section", { class: "card stack", style: "flex:1 1 300px" }, h("h2", null, "General: todas las cuentas"),
         h("div", { class: "kv" }, h("div", null, h("span", null, "Entradas " + label), h("b", { class: "mono" }, usd(d.general.income))), h("div", null, h("span", null, "Gastos " + label), h("b", { class: "mono" }, usd(d.general.spend))),
           h("div", null, h("span", null, "Saldo en cuentas de otras personas"), h("b", { class: "mono" }, usd(othersCash)))),
+        (d.by_person || []).some((x) => x.n || x.accounts.length) || d.starkum?.n ? h("div", { class: "stack", style: "gap:6px" }, h("b", { class: "small" }, "Por persona " + label),
+          ...(d.by_person || []).filter((x) => x.n || x.accounts.length).map((x) => h("div", { class: "row between small", style: "gap:8px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--line)" },
+            h("span", null, h("b", null, x.name), x.accounts.length ? h("span", { class: "muted" }, ` · saldo ${usd(x.cash)}`) : ""),
+            h("span", { class: "mono" }, `entró ${usd(x.income)} · gastó ${usd(x.spend)} · ${x.n} mov.`))),
+          d.starkum?.n ? h("div", { class: "row between small", style: "gap:8px;padding:6px 0" }, h("b", null, "Starkum (empresa)"), h("span", { class: "mono" }, `${usd(d.starkum.total)} · ${d.starkum.n} mov.`)) : "") : "",
         h("b", { class: "small" }, "En qué se fue (todas)"), catBars(d.general.by_category.slice(0, 8), usd),
         d.due.length ? h("div", { class: "stack", style: "gap:4px" }, h("b", { class: "small" }, "Próximos pagos de tarjeta"), d.due.map((x) => h("span", { class: "small" }, `${x.nickname} •••• ${x.last4}: ${fdate(x.due_date)}`))) : "")),
     h("h2", { style: "margin:0" }, "Por cuenta"),
     d.per_account.length ? h("div", { class: "grid g3" }, d.per_account.map(acctCard)) : h("p", { class: "empty" }, "Todavía no hay cuentas. Conéctalas o agrégalas en Cuentas y tarjetas."),
     h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Últimos movimientos"), h("a", { href: `#/personal/movimientos?${year ? "anio=" + year : "mes=" + month}`, style: "font-weight:700" }, "Ver todos →")),
-      d.items.length ? movesTable(d.items.slice(0, 8), d.categories) : h("p", { class: "empty" }, "No hay movimientos en este período.")));
+      d.items.length ? movesTable(d.items.slice(0, 8), d.categories, d.people) : h("p", { class: "empty" }, "No hay movimientos en este período.")));
 }
-function movesTable(items, cats) {
+// De quién es el dinero: Mío (personal, predeterminado), Starkum, y las personas registradas
+const ownerList = (people) => [["personal", "Mío (personal)"], ["starkum", "Starkum (empresa)"], ...(people || []).map((x) => [x.id, x.name])];
+const ownerName = (id, people) => (ownerList(people).find(([k]) => k === id) || [id, id === "otro" ? "Otra persona" : id])[1];
+function ownerSelect(x, people) {
+  const sel = h("select", { "aria-label": "De quién es este movimiento", style: "width:auto;max-width:170px" + (x.owner !== "personal" ? ";font-weight:700" : "") },
+    ownerList(people).map(([k, l]) => h("option", { value: k, selected: k === x.owner }, l)));
+  sel.onchange = async () => {
+    const v = sel.value;
+    if (v === x.owner) return;
+    if (v === "starkum") { sel.value = x.owner; return toCompanyDialog(x); }
+    const go = async () => { sel.disabled = true;
+      try { const r = await api(`/personal/lines/${x.id}/owner`, { method: "PUT", body: { owner: v } }); toast((r.undone ? "Quitado de la empresa. " : "") + `Ahora es de: ${ownerName(v, people)}.`); route(); } catch (e) { sel.value = x.owner; sel.disabled = false; toast(e.message); } };
+    if (x.owner === "starkum") { sel.value = x.owner; const dlg = modal("Quitar de Starkum", () => h("p", { style: "margin:0" }, `Este movimiento ya está registrado en la contabilidad de la empresa. Si lo pasas a "${ownerName(v, people)}", se quita de Starkum.`), go, "Cambiar"); return dlg; }
+    go();
+  };
+  return sel;
+}
+function movesTable(items, cats, people) {
   const setCat = async (x, cat) => { const r = await api("/personal/lines/" + x.id, { method: "PUT", body: { category: cat, learn: true } }); toast(r.same ? `Listo. También cambié ${r.same} movimiento(s) del mismo comercio y lo recordaré.` : "Listo. Lo recordaré para este comercio."); route(); };
-  return h("div", { class: "tablewrap" }, h("table", { style: "min-width:720px" }, h("thead", null, h("tr", null, ["Fecha", "Descripción", "Categoría", "Monto", ""].map((c) => h("th", null, c)))),
-    h("tbody", null, items.map((x) => h("tr", { style: x.status === "empresa" ? "opacity:.6" : "" }, h("td", { class: "mono" }, fdate(x.date)),
+  return h("div", { class: "tablewrap" }, h("table", { style: "min-width:720px" }, h("thead", null, h("tr", null, ["Fecha", "Descripción", "Categoría", "Monto", "De quién", ""].map((c) => h("th", null, c)))),
+    h("tbody", null, items.map((x) => h("tr", { style: x.owner && x.owner !== "personal" ? "opacity:.7" : "" }, h("td", { class: "mono" }, fdate(x.date)),
       h("td", { class: "small" }, h("b", { style: "color:var(--ink)" }, x.desc), x.pending ? [" ", pill("Pendiente", "warn")] : "", h("div", { class: "muted" }, x.kind === "manual" ? "Movimiento manual" : x.card)),
       h("td", null, x.kind === "banco" && x.status !== "empresa" ? h("select", { "aria-label": "Categoría", style: "width:auto;max-width:210px", onchange: (e) => setCat(x, e.target.value) }, cats.map((c) => h("option", { selected: c === x.category }, c))) : h("span", { class: "small" }, x.status === "empresa" ? "Pasado a la empresa" : x.category)),
       h("td", { class: "mono", style: x.amount > 0 ? "color:var(--ok)" : "" }, (x.amount < 0 ? "−" : "+") + money(Math.abs(x.amount))),
+      h("td", null, x.kind === "banco" ? ownerSelect(x, people) : h("span", { class: "small" }, "Mío (personal)")),
       h("td", null, h("span", { class: "row", style: "gap:10px" },
-        x.kind === "banco" && x.status !== "empresa" ? h("button", { class: "linkbtn small", type: "button", onclick: () => toCompanyDialog(x) }, "Es de Starkum") : "",
         x.kind === "banco" && x.status !== "empresa" ? h("button", { class: "linkbtn small", type: "button", onclick: async () => { await api("/bank/lines/" + x.id, { method: "PUT", body: { status: "ignorado" } }); toast("Ignorado: ya no cuenta en tus gastos."); route(); } }, "Ignorar") : "",
         x.kind === "manual" ? h("button", { class: "linkbtn small", type: "button", style: "color:var(--bad)", onclick: () => confirmDelete("Eliminar movimiento", "Se borra este movimiento manual.", async () => { await api("/moves/" + x.id, { method: "DELETE" }); route(); }) }, "Eliminar") : "")))))));
 }
 function personalMoves(d, month, year) {
-  let cat = "", text = "", acct = new URLSearchParams(location.hash.split("?")[1] || "").get("cuenta") || "";
+  let cat = "", text = "", who = "", acct = new URLSearchParams(location.hash.split("?")[1] || "").get("cuenta") || "";
   const box = h("div");
-  const draw = () => box.replaceChildren(movesTable(d.items.filter((x) => (!cat || x.category === cat) && (!acct || x.card_id === acct) && (!text || x.desc.toLowerCase().includes(text))), d.categories));
+  const draw = () => box.replaceChildren(movesTable(d.items.filter((x) => (!cat || x.category === cat) && (!acct || x.card_id === acct) && (!who || x.owner === who) && (!text || x.desc.toLowerCase().includes(text))), d.categories, d.people));
   draw();
   return h("div", { class: "stack", style: "gap:16px" },
     h("div", { class: "row between" }, monthNav("#/personal/movimientos", month, year), h("div", { class: "row only-admin", style: "gap:8px" },
@@ -1321,8 +1344,9 @@ function personalMoves(d, month, year) {
       h("button", { class: "btn primary sm", type: "button", onclick: () => personalMoveDialog(d.categories) }, "+ Movimiento manual"))),
     h("div", { class: "row", style: "gap:10px;flex-wrap:wrap" }, h("input", { type: "search", placeholder: "Buscar comercio o descripción", style: "max-width:300px", oninput: (e) => { text = e.target.value.toLowerCase(); draw(); } }),
       h("select", { "aria-label": "Filtrar por categoría", style: "width:auto", onchange: (e) => { cat = e.target.value; draw(); } }, h("option", { value: "" }, "Todas las categorías"), d.categories.map((c) => h("option", null, c))),
-      h("select", { "aria-label": "Filtrar por cuenta", style: "width:auto", onchange: (e) => { acct = e.target.value; draw(); } }, h("option", { value: "" }, "Todas las cuentas"), d.accounts.map((a) => h("option", { value: a.id, selected: a.id === acct }, `${a.nickname} •••• ${a.last4}`)))),
-    h("section", { class: "card stack" }, h("p", { class: "small muted", style: "margin:0" }, "Si cambias la categoría de un movimiento, la intranet la recuerda para ese comercio. \"Es de Starkum\" lo pasa a la empresa como gasto pagado con tu cuenta personal (para el contador es un aporte del dueño)."), box));
+      h("select", { "aria-label": "Filtrar por cuenta", style: "width:auto", onchange: (e) => { acct = e.target.value; draw(); } }, h("option", { value: "" }, "Todas las cuentas"), d.accounts.map((a) => h("option", { value: a.id, selected: a.id === acct }, `${a.nickname} •••• ${a.last4}`))),
+      h("select", { "aria-label": "Filtrar por persona", style: "width:auto", onchange: (e) => { who = e.target.value; draw(); } }, h("option", { value: "" }, "De todos"), ownerList(d.people).map(([k, l]) => h("option", { value: k }, l)))),
+    h("section", { class: "card stack" }, h("p", { class: "small muted", style: "margin:0" }, "Si cambias la categoría de un movimiento, la intranet la recuerda para ese comercio. En \"De quién\" eliges a quién pertenece cada movimiento: por defecto es tuyo (o de la persona dueña de esa cuenta). \"Starkum\" lo pasa a la empresa como gasto pagado con tu cuenta personal (para el contador es un aporte del dueño)."), box));
 }
 function personalMoveDialog(cats) {
   modal("Movimiento manual", () => h("div", { class: "stack" },
@@ -1353,7 +1377,7 @@ function balanceLine(c) {
   const debt = c.card_type !== "debito" && c.balance < 0;
   return h("span", { class: "stack", style: "gap:0" },
     h("b", { class: "mono", style: `font-size:22px;${debt ? "color:var(--warn)" : ""}` }, balanceText(c)),
-    h("span", { class: "small muted" }, c.balance == null ? (c.sfin_id ? "Sincroniza para traer el saldo" : "Actualízalo a mano o conéctala") : `${c.card_type === "debito" ? "Saldo disponible" : "Saldo de la tarjeta"} al ${fdate(c.balance_at)}${c.sfin_id ? " · automático" : ""}${c.others_money ? " · no es tu dinero" : ""}`),
+    h("span", { class: "small muted" }, c.balance == null ? (c.sfin_id ? "Sincroniza para traer el saldo" : "Actualízalo a mano o conéctala") : `${c.card_type === "debito" ? "Saldo disponible" : "Saldo de la tarjeta"} al ${fdate(c.balance_at)}${c.sfin_id ? " · automático" : ""}${c.others_money ? (c.money_owner && c.money_owner !== "personal" ? " · dinero de " + ownerName(c.money_owner, state.people) : " · no es tu dinero") : ""}`),
     ledgerNote(c) ? h("span", { class: "small muted" }, ledgerNote(c)) : "");
 }
 function balancesTable(cards) {
@@ -1364,7 +1388,7 @@ function balancesTable(cards) {
       h("span", { class: "small" }, "Tuyo: ", h("b", { class: "mono" }, money(cash)), " en cuentas · ", h("b", { class: "mono", style: "color:var(--warn)" }, money(owed)), " de deuda · patrimonio ", h("b", { class: "mono" }, money(cash - owed)))),
     h("div", { class: "tablewrap" }, h("table", { style: "min-width:560px" }, h("thead", null, h("tr", null, ["Cuenta", "Banco", "Tipo", "Saldo disponible / deuda", "Actualizado"].map((t) => h("th", null, t)))),
       h("tbody", null, byBank(cards).flatMap(([, list]) => list).map((c) => h("tr", { style: c.others_money ? "opacity:.65" : "" },
-        h("td", null, h("b", null, c.nickname), " ", h("span", { class: "muted small" }, "•••• " + c.last4), c.others_money ? [" ", pill("No es tu dinero", "info")] : ""),
+        h("td", null, h("b", null, c.nickname), " ", h("span", { class: "muted small" }, "•••• " + c.last4), c.others_money ? [" ", pill(c.money_owner && c.money_owner !== "personal" ? "Dinero de " + ownerName(c.money_owner, state.people) : "No es tu dinero", "info")] : ""),
         h("td", { class: "small" }, bankOf(c.issuer)), h("td", { class: "small" }, CTYPE[c.card_type]),
         h("td", { class: "mono", style: c.card_type !== "debito" && c.balance < 0 ? "color:var(--warn);font-weight:700" : "font-weight:700" }, balanceText(c), ledgerNote(c) ? h("div", { class: "small muted", style: "font-weight:400" }, "contable " + money(c.balance)) : ""),
         h("td", { class: "small muted" }, c.balance_at ? fdate(c.balance_at) : "—")))))));
