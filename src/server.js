@@ -29,6 +29,7 @@ const MIGRATIONS = [
   "CREATE INDEX IF NOT EXISTS bank_ext ON bank_lines(ext_id)",
   "ALTER TABLE cards ADD COLUMN others_money INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE bank_lines ADD COLUMN cat_manual INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE cards ADD COLUMN available REAL", "ALTER TABLE cards ADD COLUMN bank_balance_at TEXT",
   "CREATE TABLE IF NOT EXISTS p_rules (id TEXT PRIMARY KEY, pattern TEXT NOT NULL UNIQUE, category TEXT NOT NULL, created_at TEXT NOT NULL)",
   "INSERT OR IGNORE INTO entities (id, name, country, details) VALUES ('personal', 'Personal', 'Solo para ti', '{}')",
   "UPDATE suppliers SET kind = 'Herramientas/Suscripciones', status = COALESCE(NULLIF(status,'investigar'), 'activo') WHERE id IN (SELECT supplier_id FROM invoices WHERE kind = 'suscripción' AND supplier_id IS NOT NULL) AND COALESCE(kind, 'Otro') = 'Otro'",
@@ -434,7 +435,8 @@ async function sfinStore(env, data, updateBalances, touched) {
   let added = 0;
   for (const a of data.accounts || []) {
     const card = cards.find((c) => c.sfin_id === a.id); if (!card) continue;
-    if (updateBalances) await env.DB.prepare("UPDATE cards SET balance = ?, balance_at = ?, currency = ? WHERE id = ?").bind(num(a.balance), a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : now(), a.currency || "USD", card.id).run();
+    // balance_at = la fecha en que el banco reportó el saldo (no la de la sincronización)
+    if (updateBalances) await env.DB.prepare("UPDATE cards SET balance = ?, available = ?, balance_at = ?, bank_balance_at = ?, currency = ? WHERE id = ?").bind(num(a.balance), num(a["available-balance"]), a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : now(), a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : null, a.currency || "USD", card.id).run();
     // Las tarjetas personales registradas en una empresa (para sus facturas) llevan sus movimientos al espacio Personal
     const ent = card.entity_id === "personal" || card.owner === "personal" || !card.entity_id ? "personal" : card.entity_id;
     const ids = (a.transactions || []).map((t) => `sfin:${a.id}:${t.id}`);
@@ -1629,7 +1631,7 @@ async function api(req, env, url, user) {
     const data = await sfinGet(env, "/accounts?balances-only=1").catch((e) => ({ error: e.message }));
     if (data.error) return fail(data.error, 502);
     const cards = (await env.DB.prepare("SELECT id, nickname, last4, entity_id, sfin_id FROM cards WHERE sfin_id IS NOT NULL").all()).results;
-    return json({ accounts: (data.accounts || []).map((a) => ({ id: a.id, name: a.name, org: a.org?.name || a.org?.domain || "", currency: a.currency, balance: num(a.balance), card: cards.find((c) => c.sfin_id === a.id) || null })), errors: data.errors || [] });
+    return json({ accounts: (data.accounts || []).map((a) => ({ id: a.id, name: a.name, org: a.org?.name || a.org?.domain || "", currency: a.currency, balance: num(a.balance), available: num(a["available-balance"]), balance_date: a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : null, card: cards.find((c) => c.sfin_id === a.id) || null })), errors: data.errors || [] });
   }
   if (p === "/personal/sfin/map" && m === "POST") {
     const b = await body();
