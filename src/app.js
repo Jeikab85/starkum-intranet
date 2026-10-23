@@ -1434,6 +1434,11 @@ async function sfinView() {
           "Mostrar en Resumen") : h("span", { class: "small muted", style: "white-space:nowrap" }, "Asígnala para mostrarla");
         return h("div", { class: "row between", style: "padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", { class: "stack", style: "gap:2px" }, h("span", null, h("b", null, a.name), a.is_new ? [" ", pill("Nueva", "ok")] : !a.card ? [" ", pill("Sin asignar")] : ""), h("span", { class: "small muted" }, `${a.org} · ` + (a.balance < 0 ? `debes ${money(Math.abs(a.balance), a.currency || "USD")}` : `disponible ${money(a.available ? a.available : a.balance || 0, a.currency || "USD")}`))), h("span", { class: "row", style: "gap:14px;flex-wrap:wrap" }, vis, sel));
       })),
+      (() => { const loose = pcards.filter((c) => c.active !== 0 && !c.sfin_id);
+        return loose.length ? h("div", { class: "stack", style: "gap:6px;padding-top:6px" }, h("b", { class: "small" }, "Cuentas sin conexión automática"),
+          ...loose.map((c) => h("div", { class: "row between", style: "padding:6px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", null, h("b", null, c.nickname), h("span", { class: "small muted" }, ` · ${bankOf(c.issuer)} · •••• ${c.last4}`)),
+            h("label", { class: "row small", style: "gap:6px;white-space:nowrap;cursor:pointer" }, h("input", { type: "checkbox", checked: !c.hide_summary, style: "width:auto", onchange: async (e) => { const on = e.target.checked; e.target.disabled = true;
+              try { await api(`/personal/accounts/${c.id}/visible`, { method: "PUT", body: { show: on } }); toast(on ? `${c.nickname}: se muestra en el Resumen.` : `${c.nickname}: oculta en el Resumen.`); } catch (err) { e.target.checked = !on; toast(err.message); } finally { e.target.disabled = false; } } }), "Mostrar en Resumen")))) : ""; })(),
       h("p", { class: "small muted", style: "margin:0" }, "Si una cuenta es de la empresa (por ejemplo, la Chase de Starkum), asígnala a la cuenta de la LLC: sus movimientos llegan solos a la conciliación del banco de la empresa."));
   }
   return h("div", { class: "stack", style: "gap:16px" }, vaultBox, connectBox, accBox);
