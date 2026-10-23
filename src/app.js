@@ -45,6 +45,7 @@ function holdingsIcon(tone, size = 40) {
 }
 function entityLogo(e, size = 72) {
   const box = h("span", { class: "entlogo", style: `width:${size}px;height:${size}px`, "aria-hidden": "true" });
+  if (e.id === "personal") { box.innerHTML = `<svg viewBox="0 0 48 48" width="${Math.round(size * 0.62)}" height="${Math.round(size * 0.62)}"><defs><linearGradient id="pg${size}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9aa5ac"/><stop offset="1" stop-color="#3f6f57"/></linearGradient></defs><circle cx="24" cy="16" r="9" fill="url(#pg${size})"/><path d="M6 44c1.5-10 9-15 18-15s16.5 5 18 15" fill="url(#pg${size})"/></svg>`; return box; }
   const fallback = () => box.replaceChildren(holdingsIcon("", Math.round(size * 0.78)));
   const img = h("img", { src: `/api/entities/${e.id}/logo?v=${state.logoV || 0}`, alt: "", onerror: fallback });
   box.append(img);
@@ -115,7 +116,11 @@ function shell(content, active) {
   const a = (href, key, label, cls = "") => h("a", { href, class: (active === key ? "on " : "") + cls }, label);
   const nav = h("nav", { class: "side", id: "side", "aria-label": "Menú principal" },
     h("a", { class: "brand", href: "#/" }, logo("light", 30), h("span", { class: "brandtext" }, h("b", null, "Starkum"), h("span", null, "Intranet"))),
-    ent ? [
+    ent && ent.id === "personal" ? [
+      h("div", { class: "navgroup" }, h("span", { class: "label" }, "Personal"),
+        h("a", { href: "#/", class: "entswitch", title: "Volver a elegir" }, h("b", null, "Mis finanzas"), h("span", null, "Cambiar de espacio")),
+        PTABS.map(([k, l]) => a(`#/personal/${k}`, `personal-${k}`, l)))
+    ] : ent ? [
       h("div", { class: "navgroup" }, h("span", { class: "label" }, "Empresa"),
         h("a", { href: "#/", class: "entswitch", title: "Volver a elegir empresa" }, h("b", null, ent.name), h("span", null, "Cambiar de empresa")),
         a(`#/empresa/${ent.id}`, `empresa-${ent.id}-inicio`, "Inicio"),
@@ -291,14 +296,14 @@ async function pageHome() {
   state.entities = entities.map((e) => ({ ...e, ...(state.entities.find((x) => x.id === e.id) || {}), details: e.details }));
   const page = h("div", { class: "page chooser" },
     h("div", { class: "chooserhead" }, logo("auto", 72), h("h1", null, "¿En qué empresa vas a trabajar?")),
-    h("div", { class: "entpick" }, entities.map((e) => h("div", { class: "entwrap" }, h("a", { class: "entcard", href: "#/empresa/" + e.id },
+    h("div", { class: "entpick" + (entities.length > 2 ? " three" : "") }, entities.map((e) => h("div", { class: "entwrap" }, h("a", { class: "entcard", href: e.id === "personal" ? "#/personal" : "#/empresa/" + e.id },
       entityLogo(e, 96), h("span", { class: "stack", style: "gap:4px;align-items:center;text-align:center" }, h("b", { style: "font-size:22px" }, e.name), h("span", { class: "muted" }, e.country))),
       entityWeb(e)))));
   shell(page, "inicio");
 }
 async function companyHome(ent) {
   const d = await api("/dashboard?entity=" + ent.id);
-  state.businesses = d.all_businesses; state.entities = d.entities;
+  state.businesses = d.all_businesses; state.entities = [...d.entities, ...state.entities.filter((e) => e.id === "personal")];
   const hour = Number(new Date().toLocaleString("en-US", { hour: "numeric", hour12: false, timeZone: "America/Chicago" }));
   const hello = hour < 12 ? "Buenos días" : hour < 19 ? "Buenas tardes" : "Buenas noches";
   const today = new Date().toLocaleDateString("es-US", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "America/Chicago" });
@@ -843,7 +848,9 @@ async function cardsView(entityId) {
       kv("Últimos 4 dígitos", "•••• " + c.last4), kv("Vencimiento", c.exp_month && c.exp_year ? `${String(c.exp_month).padStart(2, "0")}/${c.exp_year}` : ""),
       debit ? kv("Día de corte del extracto", c.closing_day ? "Día " + c.closing_day : "Fin de mes") : kv("Día de cierre", c.closing_day ? "Día " + c.closing_day : ""),
       debit ? "" : kv("Día límite de pago", c.due_day ? "Día " + c.due_day : ""), debit ? "" : kv("Límite de crédito", c.credit_limit != null ? money(c.credit_limit) : ""),
-      kv("Es de", c.owner === "empresa" ? "La empresa" : "Uso personal"), c.notes ? kv("Notas", c.notes) : "");
+      kv("Es de", c.owner === "empresa" ? "La empresa" : "Uso personal"), c.notes ? kv("Notas", c.notes) : "",
+      c.balance != null ? kv(c.card_type === "debito" ? "Saldo" : "Saldo de la tarjeta", (c.card_type !== "debito" && c.balance < 0 ? "Debes " : "") + money(Math.abs(c.balance), c.currency || "USD") + (c.balance_at ? ` · ${fdate(c.balance_at)}` : "")) : "",
+      c.sfin_id ? kv("Conexión", "Automática (SimpleFIN)") : "");
   };
   const entName = (id) => (state.entities.find((e) => e.id === id) || {}).name;
   return h("div", { class: "stack", style: "gap:14px" },
@@ -857,7 +864,7 @@ async function cardsView(entityId) {
           h("div", { class: "stack", style: "gap:2px" }, h("b", { style: "font-size:17px" }, c.nickname),
             h("span", { class: "small" }, `${c.uses.n} factura${c.uses.n === 1 ? "" : "s"} pagada${c.uses.n === 1 ? "" : "s"} con ella · ${money(c.uses.total)}`),
             !c.entity_id ? h("span", { class: "small muted" }, "Se usa en todas las empresas") : "")),
-        h("div", { class: "row only-admin" }, h("button", { class: "btn sm", type: "button", onclick: () => cardDialog(c, entityId) }, "Editar"),
+        h("div", { class: "row only-admin" }, entityId === "personal" && !c.sfin_id ? h("button", { class: "btn sm", type: "button", onclick: () => balanceDialog(c) }, "Actualizar saldo") : "", h("button", { class: "btn sm", type: "button", onclick: () => cardDialog(c, entityId) }, "Editar"),
           h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Eliminar tarjeta", `Se borra ${c.nickname} •••• ${c.last4} y sus estados de cuenta. Las facturas no se borran: quedan sin tarjeta asociada.`, async () => { await api("/cards/" + c.id, { method: "DELETE" }); toast("Tarjeta eliminada."); route(); }) }, "Eliminar"))),
       info(c), cyclesView(c)))))) : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay tarjetas de esta empresa. Agrega cada tarjeta con la que compras.")));
 }
@@ -1216,6 +1223,150 @@ async function moveDialog(ent, line) {
   }, line ? "Registrar" : "Agregar");
 }
 
+// ---------- espacio Personal (solo el administrador lo ve) ----------
+const PTABS = [["resumen", "Resumen"], ["movimientos", "Movimientos"], ["cuentas", "Cuentas y tarjetas"], ["suscripciones", "Suscripciones"], ["conexion", "Conexión bancaria"]];
+function monthNav(base, month) {
+  const [y, m] = month.split("-").map(Number);
+  const shift = (k) => { const d = new Date(Date.UTC(y, m - 1 + k, 1)); return d.toISOString().slice(0, 7); };
+  return h("div", { class: "row", style: "gap:8px" }, h("a", { class: "btn sm", href: base + "?mes=" + shift(-1) }, "‹"), h("b", { style: "min-width:150px;text-align:center" }, MONTHS[m - 1] + " " + y), h("a", { class: "btn sm", href: base + "?mes=" + shift(1) }, "›"));
+}
+async function pagePersonal(tab, q) {
+  tab = PTABS.some((t) => t[0] === tab) ? tab : "resumen";
+  setEntity("personal");
+  const act = "personal-" + tab;
+  shell(loading(), act);
+  const ent = state.entities.find((e) => e.id === "personal") || { id: "personal", name: "Personal", details: {} };
+  const head = [h("div", { class: "head" }, h("div", { class: "row", style: "gap:14px;align-items:center;flex-wrap:nowrap" }, entityLogo(ent, 56), h("div", null, h("span", { class: "eyebrow" }, "Personal · solo tú lo ves"), h("h1", null, "Mis finanzas")))),
+    h("div", { class: "tabs", role: "tablist" }, PTABS.map(([k, l]) => h("a", { href: `#/personal/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
+  const month = /^\d{4}-\d{2}$/.test(q.get("mes") || "") ? q.get("mes") : new Date().toISOString().slice(0, 7);
+  let content;
+  if (tab === "cuentas") content = await cardsView("personal");
+  else if (tab === "suscripciones") content = await subsView(ent, null, q);
+  else if (tab === "conexion") content = await sfinView();
+  else {
+    const d = await api("/personal/summary?month=" + month);
+    content = tab === "movimientos" ? personalMoves(d, month) : personalSummary(d, month);
+  }
+  shell(h("div", { class: "page" }, ...head, content), act);
+}
+function personalSummary(d, month) {
+  const usd = (v) => money(v, "USD");
+  const debit = d.accounts.filter((a) => a.card_type === "debito"), credit = d.accounts.filter((a) => a.card_type !== "debito");
+  const cash = debit.reduce((s, a) => s + (Number(a.balance) || 0), 0), owed = credit.reduce((s, a) => s + Math.abs(Math.min(0, Number(a.balance) || 0)), 0);
+  const stat = (l, v, cls) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, l), h("br"), h("b", { style: cls || "" }, v));
+  const max = Math.max(1, ...d.by_category.map((c) => c.total));
+  const noBal = d.accounts.filter((a) => a.balance == null).length;
+  return h("div", { class: "stack", style: "gap:18px" },
+    h("div", { class: "row between" }, monthNav("#/personal/resumen", month), h("div", { class: "row only-admin", style: "gap:8px" },
+      h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog({ id: "personal", name: "Personal" }) }, "Leer extracto"),
+      h("button", { class: "btn primary sm", type: "button", onclick: () => personalMoveDialog(d.categories) }, "+ Movimiento manual"))),
+    !d.sfin.connected ? h("section", { class: "card row between" }, h("span", { class: "small" }, "Conecta tus bancos para que los movimientos y saldos lleguen solos todos los días."), h("a", { class: "btn sm", href: "#/personal/conexion" }, "Conectar bancos")) : "",
+    h("div", { class: "grid g4" }, stat("Patrimonio (cuentas − tarjetas)", usd(cash - owed), cash - owed < 0 ? "color:var(--bad)" : ""), stat("Disponible en cuentas", usd(cash)), stat("Debes en tarjetas", usd(owed), owed ? "color:var(--warn)" : ""), stat("Ahorro del mes", usd(d.income - d.spend), d.income - d.spend < 0 ? "color:var(--bad)" : "color:var(--ok)")),
+    h("div", { class: "grid g4" }, stat("Ingresos del mes", usd(d.income)), stat("Gastos del mes", usd(d.spend)), stat("Suscripciones del mes", usd(d.sub_charges.reduce((s, x) => s + (x.currency === "USD" ? x.amount : 0), 0))), stat("Movimientos", d.items.length)),
+    noBal ? h("p", { class: "small muted", style: "margin:0" }, `${noBal} cuenta(s) sin saldo: conéctalas o actualiza el saldo en Cuentas y tarjetas para que el patrimonio sea exacto.`) : "",
+    h("div", { class: "split" },
+      h("section", { class: "card stack", style: "flex:1 1 360px" }, h("h2", null, "En qué se fue el dinero"),
+        d.by_category.length ? h("div", { class: "stack", style: "gap:8px" }, d.by_category.map((c) => h("div", null,
+          h("div", { class: "row between small" }, h("span", null, c.category), h("b", { class: "mono" }, usd(c.total))),
+          h("div", { style: "height:8px;border-radius:5px;background:var(--line);overflow:hidden" }, h("div", { style: `height:100%;width:${(c.total / max) * 100}%;background:linear-gradient(90deg,#6b767e,#3f6f57)` }))))) : h("p", { class: "empty" }, "Todavía no hay gastos en este mes.")),
+      h("section", { class: "card stack", style: "flex:1 1 300px" }, h("h2", null, "Cuentas y tarjetas"),
+        d.accounts.length ? h("div", { class: "list" }, d.accounts.map((a) => h("a", { href: "#/personal/cuentas" }, h("span", { class: "stack", style: "gap:2px" }, h("b", { style: "color:var(--ink)" }, a.nickname), h("span", { class: "small muted" }, [bankOf(a.issuer), CTYPE[a.card_type], "•••• " + a.last4].join(" · "))),
+          h("b", { class: "mono", style: a.card_type !== "debito" && a.balance < 0 ? "color:var(--warn)" : "" }, a.balance == null ? "—" : (a.card_type !== "debito" && a.balance < 0 ? "Debes " : "") + money(Math.abs(a.balance), a.currency || "USD"))))) : h("p", { class: "empty" }, "Agrega tus cuentas en Cuentas y tarjetas o conéctalas."),
+        d.due.length ? h("div", { class: "stack", style: "gap:4px" }, h("b", { class: "small" }, "Próximos pagos de tarjeta"), d.due.map((x) => h("span", { class: "small" }, `${x.nickname} •••• ${x.last4}: ${fdate(x.due_date)}`))) : "")),
+    h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Últimos movimientos"), h("a", { href: "#/personal/movimientos?mes=" + month, style: "font-weight:700" }, "Ver todos →")),
+      d.items.length ? movesTable(d.items.slice(0, 8), d.categories) : h("p", { class: "empty" }, "No hay movimientos en este mes.")));
+}
+function movesTable(items, cats) {
+  const setCat = async (x, cat) => { const r = await api("/personal/lines/" + x.id, { method: "PUT", body: { category: cat, learn: true } }); toast(r.same ? `Listo. También cambié ${r.same} movimiento(s) del mismo comercio y lo recordaré.` : "Listo. Lo recordaré para este comercio."); route(); };
+  return h("div", { class: "tablewrap" }, h("table", { style: "min-width:720px" }, h("thead", null, h("tr", null, ["Fecha", "Descripción", "Categoría", "Monto", ""].map((c) => h("th", null, c)))),
+    h("tbody", null, items.map((x) => h("tr", { style: x.status === "empresa" ? "opacity:.6" : "" }, h("td", { class: "mono" }, fdate(x.date)),
+      h("td", { class: "small" }, h("b", { style: "color:var(--ink)" }, x.desc), x.pending ? [" ", pill("Pendiente", "warn")] : "", h("div", { class: "muted" }, x.kind === "manual" ? "Movimiento manual" : x.card)),
+      h("td", null, x.kind === "banco" && x.status !== "empresa" ? h("select", { "aria-label": "Categoría", style: "width:auto;max-width:210px", onchange: (e) => setCat(x, e.target.value) }, cats.map((c) => h("option", { selected: c === x.category }, c))) : h("span", { class: "small" }, x.status === "empresa" ? "Pasado a la empresa" : x.category)),
+      h("td", { class: "mono", style: x.amount > 0 ? "color:var(--ok)" : "" }, (x.amount < 0 ? "−" : "+") + money(Math.abs(x.amount))),
+      h("td", null, h("span", { class: "row", style: "gap:10px" },
+        x.kind === "banco" && x.status !== "empresa" ? h("button", { class: "linkbtn small", type: "button", onclick: () => toCompanyDialog(x) }, "Es de Starkum") : "",
+        x.kind === "banco" && x.status !== "empresa" ? h("button", { class: "linkbtn small", type: "button", onclick: async () => { await api("/bank/lines/" + x.id, { method: "PUT", body: { status: "ignorado" } }); toast("Ignorado: ya no cuenta en tus gastos."); route(); } }, "Ignorar") : "",
+        x.kind === "manual" ? h("button", { class: "linkbtn small", type: "button", style: "color:var(--bad)", onclick: () => confirmDelete("Eliminar movimiento", "Se borra este movimiento manual.", async () => { await api("/moves/" + x.id, { method: "DELETE" }); route(); }) }, "Eliminar") : "")))))));
+}
+function personalMoves(d, month) {
+  let cat = "", text = "";
+  const box = h("div");
+  const draw = () => box.replaceChildren(movesTable(d.items.filter((x) => (!cat || x.category === cat) && (!text || x.desc.toLowerCase().includes(text))), d.categories));
+  draw();
+  return h("div", { class: "stack", style: "gap:16px" },
+    h("div", { class: "row between" }, monthNav("#/personal/movimientos", month), h("div", { class: "row only-admin", style: "gap:8px" },
+      h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog({ id: "personal", name: "Personal" }) }, "Leer extracto"),
+      h("button", { class: "btn primary sm", type: "button", onclick: () => personalMoveDialog(d.categories) }, "+ Movimiento manual"))),
+    h("div", { class: "row", style: "gap:10px;flex-wrap:wrap" }, h("input", { type: "search", placeholder: "Buscar comercio o descripción", style: "max-width:300px", oninput: (e) => { text = e.target.value.toLowerCase(); draw(); } }),
+      h("select", { "aria-label": "Filtrar por categoría", style: "width:auto", onchange: (e) => { cat = e.target.value; draw(); } }, h("option", { value: "" }, "Todas las categorías"), d.categories.map((c) => h("option", null, c)))),
+    h("section", { class: "card stack" }, h("p", { class: "small muted", style: "margin:0" }, "Si cambias la categoría de un movimiento, la intranet la recuerda para ese comercio. \"Es de Starkum\" lo pasa a la empresa como gasto pagado con tu cuenta personal (para el contador es un aporte del dueño)."), box));
+}
+function personalMoveDialog(cats) {
+  modal("Movimiento manual", () => h("div", { class: "stack" },
+    h("div", { class: "fgrid" }, fld("Tipo", h("select", { name: "kind" }, [["gasto", "Gasto"], ["ingreso", "Ingreso"], ["transferencia", "Transferencia"]].map(([k, l]) => h("option", { value: k }, l)))),
+      fld("Categoría", h("select", { name: "category" }, cats.map((c) => h("option", { selected: c === "Otros" }, c)))), fld("Fecha", h("input", { name: "moved_on", type: "date", required: true, value: new Date().toISOString().slice(0, 10) }))),
+    h("div", { class: "fgrid" }, fld("Monto", h("input", { name: "amount", type: "number", step: "0.01", required: true, inputmode: "decimal" })), fld("Moneda", h("select", { name: "currency" }, ["USD", "COP"].map((c) => h("option", null, c))))),
+    fld("Concepto", h("input", { name: "concept", required: true, placeholder: "Por ejemplo: efectivo para el mercado" }))),
+  async (fd) => { fd.set("entity_id", "personal"); await api("/moves", { method: "POST", body: fd }); toast("Movimiento agregado."); route(); }, "Agregar");
+}
+function toCompanyDialog(x) {
+  modal("Pasar a la empresa", () => h("div", { class: "stack" },
+    h("p", { class: "small", style: "margin:0" }, h("b", null, x.desc), ` · ${fdate(x.date)} · ${money(Math.abs(x.amount))}`),
+    h("div", { class: "fgrid" }, fld("Empresa", h("select", { name: "entity_id" }, [["llc", "Starkum Holdings LLC"], ["sas", "Starkum Group SAS"]].map(([k, l]) => h("option", { value: k }, l)))),
+      fld("Categoría en la empresa", h("select", { name: "category" }, (x.amount < 0 ? MOVE_CAT.gasto : MOVE_CAT.ingreso).map((c) => h("option", null, c))))),
+    h("p", { class: "small muted", style: "margin:0" }, "Queda en \"Para el contador\" de la empresa como gasto pagado con tu cuenta personal, y deja de contar en tus gastos personales.")),
+  async (fd) => { await api(`/personal/lines/${x.id}/company`, { method: "POST", body: Object.fromEntries(fd) }); toast("Pasado a la empresa."); route(); }, "Pasar");
+}
+function balanceDialog(c) {
+  modal("Saldo de " + c.nickname, () => h("div", { class: "stack" },
+    fld(c.card_type === "debito" ? "Saldo actual de la cuenta" : "Lo que debes en la tarjeta", h("input", { name: "balance", type: "number", step: "0.01", required: true, inputmode: "decimal", value: c.balance != null ? Math.abs(c.balance) : "" })),
+    h("p", { class: "small muted", style: "margin:0" }, "Si conectas esta cuenta con SimpleFIN, el saldo se actualiza solo todos los días.")),
+  async (fd) => { const v = Math.abs(Number(fd.get("balance")) || 0); await api(`/personal/accounts/${c.id}/balance`, { method: "PUT", body: { balance: c.card_type === "debito" ? v : -v } }); toast("Saldo actualizado."); route(); });
+}
+async function sfinView() {
+  const d = await api("/personal/summary");
+  const st = d.sfin;
+  const steps = h("ol", { class: "small", style: "margin:0;padding-left:20px;line-height:1.7" },
+    h("li", null, "Entra a ", h("a", { href: "https://beta-bridge.simplefin.org", target: "_blank", rel: "noopener" }, "SimpleFIN Bridge"), ", crea tu cuenta y paga el plan ($15 al año o $1.50 al mes)."),
+    h("li", null, "Dentro de SimpleFIN, conecta tus bancos (Chase, U.S. Bank, Discover…). Tu usuario y contraseña del banco los escribes allá, nunca aquí."),
+    h("li", null, "En SimpleFIN crea una conexión para una app nueva: te da un \"Setup Token\" (un texto largo)."),
+    h("li", null, "Pégalo abajo. La intranet lo cambia por un acceso de solo lectura y lo guarda cifrado."));
+  const key = (() => { const a = new Uint8Array(32); crypto.getRandomValues(a); return [...a].map((b) => b.toString(16).padStart(2, "0")).join(""); })();
+  const vaultBox = !st.vault ? h("section", { class: "card stack", style: "border-color:var(--warn)" }, h("h2", null, "Paso previo: la clave para cifrar"),
+    h("p", { class: "small", style: "margin:0" }, "El acceso a tus bancos se guarda cifrado con una clave que solo existe en Cloudflare (no en la base de datos ni en el código). Hay que crearla una sola vez:"),
+    h("ol", { class: "small", style: "margin:0;padding-left:20px;line-height:1.7" },
+      h("li", null, "Abre Cloudflare → Workers y Pages → ", h("b", null, "intranet"), " → Settings → Variables and Secrets → Add."),
+      h("li", null, "Tipo ", h("b", null, "Secret"), ", nombre ", h("code", null, "VAULT_KEY"), ", y como valor pega esta clave (se generó solo para ti y no se guarda en ningún lado):"),
+      h("li", null, "Guarda (Deploy). Vuelve aquí y recarga la página.")),
+    h("div", { class: "row", style: "gap:8px" }, h("code", { class: "mono", style: "padding:8px 10px;background:var(--line);border-radius:8px;word-break:break-all" }, key), h("button", { class: "btn sm", type: "button", onclick: () => navigator.clipboard.writeText(key).then(() => toast("Clave copiada.")) }, "Copiar")),
+    h("p", { class: "small muted", style: "margin:0" }, "Si recargas esta página antes de guardarla, sale otra clave distinta; usa la que pegues en Cloudflare.")) : "";
+  const connectBox = h("section", { class: "card stack" }, h("h2", null, st.connected ? "Conexión activa" : "Conectar con SimpleFIN"),
+    st.connected ? h("p", { class: "small", style: "margin:0" }, st.status ? `Última sincronización: ${new Date(st.status.last_sync).toLocaleString("es-US", { timeZone: "America/Chicago" })} · ${st.status.added} movimiento(s) nuevos.` : "Conectado. Todavía no se ha sincronizado.",
+      st.status?.errors?.length ? h("span", { style: "color:var(--warn)" }, " Avisos de SimpleFIN: " + st.status.errors.join(" · ")) : "") : steps,
+    st.connected ? "" : h("form", { class: "row", style: "gap:8px", onsubmit: async (e) => { e.preventDefault(); const t = e.target.elements.tok.value; await busy(e.target.querySelector("button"), async () => { await api("/personal/sfin/connect", { method: "POST", body: { setup_token: t } }); toast("Conectado. Ahora asigna cada cuenta."); route(); }); } },
+      h("input", { name: "tok", required: true, placeholder: "Pega aquí el Setup Token de SimpleFIN", autocomplete: "off", style: "flex:1;min-width:240px", disabled: !st.vault }), h("button", { class: "btn primary", type: "submit", disabled: !st.vault }, "Conectar")),
+    h("p", { class: "small muted", style: "margin:0" }, "Solo lectura: SimpleFIN no permite mover dinero. Se sincroniza sola una vez al día; puedes forzarla con \"Sincronizar ahora\"."));
+  let accBox = "";
+  if (st.connected) {
+    const [r, { cards }] = await Promise.all([api("/personal/sfin/accounts").catch((e) => ({ error: e.message })), api("/cards")]);
+    const pcards = (await api("/cards?entity=personal")).cards;
+    const all = [...cards, ...pcards.filter((c) => !cards.some((x) => x.id === c.id))];
+    accBox = h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Cuentas conectadas"),
+        h("span", { class: "row", style: "gap:8px" }, h("button", { class: "btn primary sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => { const s2 = await api("/personal/sfin/sync", { method: "POST" }); toast(`Sincronizado: ${s2.added} movimiento(s) nuevos.`); route(); }) }, "Sincronizar ahora"),
+          h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Desconectar SimpleFIN", "Se borra el acceso guardado. Los movimientos ya traídos se quedan.", async () => { await api("/personal/sfin", { method: "DELETE" }); toast("Desconectado."); route(); }) }, "Desconectar"))),
+      r.error ? h("p", { class: "small", style: "color:var(--bad);margin:0" }, r.error) : h("div", { class: "stack", style: "gap:10px" }, r.accounts.map((a) => {
+        const sel = h("select", { "aria-label": "Asignar " + a.name, style: "width:auto;max-width:320px" }, h("option", { value: "" }, "Sin asignar (no se trae)"),
+          h("optgroup", { label: "Crear nueva" }, h("option", { value: "new:personal:debito" }, "Nueva cuenta personal"), h("option", { value: "new:personal:credito" }, "Nueva tarjeta de crédito personal")),
+          ...byBank(all).map(([bank, list]) => h("optgroup", { label: bank }, list.map((c) => h("option", { value: c.id, selected: a.card?.id === c.id }, `${c.nickname} •••• ${c.last4}` + (c.entity_id === "personal" ? " (personal)" : c.entity_id ? " (" + (c.entity_id === "llc" ? "LLC" : "SAS") + ")" : ""))))));
+        sel.onchange = async () => { const v = sel.value; const body = { sfin_id: a.id };
+          if (v.startsWith("new:")) { const [, e2, t] = v.split(":"); body.create = { entity_id: e2, card_type: t, nickname: a.name.slice(0, 60), issuer: a.org, last4: (a.name.match(/(\d{4})\D*$/) || [])[1] || "0000" }; } else body.card_id = v || null;
+          await api("/personal/sfin/map", { method: "POST", body }); toast(v ? "Cuenta asignada. Sincroniza para traer sus movimientos." : "Cuenta sin asignar."); route(); };
+        return h("div", { class: "row between", style: "padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", { class: "stack", style: "gap:2px" }, h("b", null, a.name), h("span", { class: "small muted" }, `${a.org} · saldo ${money(Math.abs(a.balance || 0), a.currency || "USD")}`)), sel);
+      })),
+      h("p", { class: "small muted", style: "margin:0" }, "Si una cuenta es de la empresa (por ejemplo, la Chase de Starkum), asígnala a la cuenta de la LLC: sus movimientos llegan solos a la conciliación del banco de la empresa."));
+  }
+  return h("div", { class: "stack", style: "gap:16px" }, vaultBox, connectBox, accBox);
+}
 // ---------- suscripciones ----------
 const CYCLE = { mensual: "Mensual", anual: "Anual", gratis: "Gratis (sin cobro)" };
 async function subsView(ent, biz, q) {
@@ -1251,7 +1402,7 @@ async function subsView(ent, biz, q) {
       h("div", { class: "tablewrap" }, h("table", { style: "min-width:860px" }, h("thead", null, h("tr", null, ["Herramienta", "Plataformas", "Valor", "Tipo", "Próximo cobro", "Tarjeta", "Facturas", ""].map((c) => h("th", null, c)))), h("tbody", null, shown.map(row)))),
       pend ? h("p", { class: "small muted", style: "margin:0" }, "Las que dicen \"Por completar\" todavía no cuentan como gasto. Cuando empieces a pagarlas, agrega el valor, el tipo, la fecha de cobro y la tarjeta.") : "")
       : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay herramientas aquí.")),
-    h("section", { class: "card stack" }, h("h2", null, "¿Cuentan como gasto de la empresa?"),
+    ent.id === "personal" ? "" : h("section", { class: "card stack" }, h("h2", null, "¿Cuentan como gasto de la empresa?"),
       h("p", { class: "small", style: "margin:0" }, ent.id === "sas"
         ? "Sí, si la herramienta se usa para el negocio. En Colombia el gasto necesita soporte: la factura electrónica del proveedor o, si es del exterior, el documento soporte. Guarda la factura de cada cobro y confirma con el contador el IVA y la retención de servicios del exterior."
         : "Sí, si la herramienta se usa para el negocio: en la LLC (Schedule C) son gastos deducibles y bajan la utilidad sobre la que pagas impuestos. Si también la usas para algo personal, solo cuenta la parte del negocio: márcala como \"Mixto\" y el contador decide el porcentaje."),
@@ -1270,7 +1421,7 @@ function subDialog(s, ent, cards, platforms, platDefault) {
     h("div", { class: "fgrid" },
       fld("Herramienta", h("input", { name: "name", required: true, value: s?.name || "", placeholder: "Por ejemplo: Keepa" })),
       fld("Enlace (opcional)", h("input", { name: "url", value: s?.url || "", placeholder: "https://…", inputmode: "url" }))),
-    h("fieldset", null, h("legend", null, "Plataformas donde la usas"),
+    ent.id === "personal" ? "" : h("fieldset", null, h("legend", null, "Plataformas donde la usas"),
       h("div", { class: "row", style: "gap:6px 16px;flex-wrap:wrap" }, platforms.map((p) => h("label", { class: "row", style: "gap:6px" }, h("input", { type: "checkbox", name: "plat", value: p.id, checked: sel.has(p.id), style: "width:auto" }), h("span", { class: "small" }, p.name, p.status === "sin_cuenta" ? h("span", { class: "muted" }, " (sin cuenta)") : "")))),
       h("p", { class: "small muted", style: "margin:4px 0 0" }, "Marca todas las que apliquen. Es un solo registro: el cobro cuenta una vez. Sin marcar ninguna queda como general de la empresa.")),
     h("p", { class: "small muted", style: "margin:0" }, "Datos del cobro: déjalos vacíos si todavía no la pagas. Si no tiene costo, elige el tipo \"Gratis\"."),
@@ -1482,7 +1633,7 @@ async function bankImportDialog(ent, opts = {}) {
   }, "Guardar y conciliar");
   if (opts.file) { dlg.addEventListener("close", () => route()); setTimeout(() => read(opts.file), 50); }
 }
-const BANK_ST = { conciliado: ["Con soporte", "ok"], sin_soporte: ["Sin soporte", "warn"], personal: ["Personal", ""], ignorado: ["Ignorado", ""] };
+const BANK_ST = { conciliado: ["Con soporte", "ok"], sin_soporte: ["Sin soporte", "warn"], personal: ["Personal", ""], ignorado: ["Ignorado", ""], empresa: ["Pasado a la empresa", "info"] };
 function bankHint(l) {
   if (l.amount > 0 && /amazon/i.test(l.description)) return "Parece un depósito de Amazon: sube el reporte de liquidación o regístralo en Lotes.";
   if (l.amount < 0 && /(fee|cargo|comisi|maintenance|service charge)/i.test(l.description)) return "Parece una comisión del banco.";
@@ -1995,6 +2146,7 @@ async function route() {
   try {
     if (!parts.length) return await pageHome();
     if (parts[0] === "plataformas") return await pagePlatforms();
+    if (parts[0] === "personal") return await pagePersonal(parts[1], q);
     if (parts[0] === "empresa" && parts[2] === "proveedor") return await pageSupplier("entity", parts[1], parts[3], q);
     if (parts[0] === "empresa") return await pageEntity(parts[1], parts[2], q);
     if (parts[0] === "negocio" && parts[2] === "proveedor") return await pageSupplier("business", parts[1], parts[3], q);

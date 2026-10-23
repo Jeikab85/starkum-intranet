@@ -24,6 +24,11 @@ const MIGRATIONS = [
   "ALTER TABLE subscriptions ADD COLUMN platform_ids TEXT NOT NULL DEFAULT '[]'",
   "ALTER TABLE invoices ADD COLUMN sub_id TEXT",
   "ALTER TABLE company_docs ADD COLUMN card_id TEXT",
+  "ALTER TABLE cards ADD COLUMN balance REAL", "ALTER TABLE cards ADD COLUMN balance_at TEXT", "ALTER TABLE cards ADD COLUMN sfin_id TEXT", "ALTER TABLE cards ADD COLUMN currency TEXT",
+  "ALTER TABLE bank_lines ADD COLUMN category TEXT", "ALTER TABLE bank_lines ADD COLUMN ext_id TEXT", "ALTER TABLE bank_lines ADD COLUMN pending INTEGER NOT NULL DEFAULT 0",
+  "CREATE INDEX IF NOT EXISTS bank_ext ON bank_lines(ext_id)",
+  "CREATE TABLE IF NOT EXISTS p_rules (id TEXT PRIMARY KEY, pattern TEXT NOT NULL UNIQUE, category TEXT NOT NULL, created_at TEXT NOT NULL)",
+  "INSERT OR IGNORE INTO entities (id, name, country, details) VALUES ('personal', 'Personal', 'Solo para ti', '{}')",
   "UPDATE suppliers SET kind = 'Herramientas/Suscripciones', status = COALESCE(NULLIF(status,'investigar'), 'activo') WHERE id IN (SELECT supplier_id FROM invoices WHERE kind = 'suscripción' AND supplier_id IS NOT NULL) AND COALESCE(kind, 'Otro') = 'Otro'",
   "UPDATE subscriptions SET platform_ids = COALESCE((SELECT json_group_array(p.id) FROM platforms p WHERE p.business_id = subscriptions.business_id), '[]') WHERE business_id IS NOT NULL AND platform_ids = '[]'",
 ];
@@ -312,6 +317,115 @@ async function backfillStatements(env) {
   const cyc = (await env.DB.prepare("SELECT cc.id FROM card_cycles cc JOIN cards cd ON cd.id = cc.card_id WHERE cd.card_type = 'debito' AND cc.file_id IS NOT NULL").all()).results;
   for (const c of cyc) await statementDocFor(env, c.id);
   await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('link_statements_v1', ?)").bind(now()).run();
+}
+
+// ---------- espacio Personal: categorías, cuentas y conexión con SimpleFIN ----------
+const PCATS = ["Ingresos", "Supermercado", "Restaurantes y comida", "Transporte y gasolina", "Vivienda", "Servicios (luz, agua, internet, celular)", "Salud", "Compras", "Entretenimiento", "Suscripciones", "Educación", "Viajes", "Familia y regalos", "Comisiones bancarias", "Impuestos", "Pago de tarjeta", "Transferencias", "Ahorro e inversión", "Empresa (Starkum)", "Otros"];
+const NOT_SPENDING = ["Pago de tarjeta", "Transferencias", "Ahorro e inversión", "Empresa (Starkum)", "Ingresos"];
+const PRULES = [
+  ["Pago de tarjeta", /payment[\s\-–:]*thank you|internet payment|mobile payment|autopay|automatic payment|card payment|crd pmt|credit card payment|pago tarjeta|epayment|e-payment|online payment.*card/i],
+  ["Comisiones bancarias", /\bfee\b|interest charge|overdraft|maintenance|service charge|comisi[oó]n|cuota de manejo/i],
+  ["Impuestos", /\birs\b|treas tax|tax pymt|dept of revenue|dian\b/i],
+  ["Transferencias", /zelle|venmo|cash app|paypal|transfer|xfer|wise\b|remitly|western union|nequi|daviplata/i],
+  ["Suscripciones", /netflix|spotify|hulu|disney|hbo|max\.com|youtube|apple\.com\/bill|icloud|google \*|chatgpt|openai|anthropic|claude\.ai|adobe|canva|microsoft|prime video|paramount|peacock/i],
+  ["Supermercado", /jewel|aldi|walmart|costco|target|whole foods|trader joe|mariano|kroger|meijer|sam'?s club|fresh market|\bd1\b|[ée]xito|carulla|olimpica|tiendas ara/i],
+  ["Restaurantes y comida", /mcdonald|starbucks|dunkin|chipotle|subway|taco|pizza|burger|restaurant|cafe|coffee|doordash|uber \*?eats|grubhub|kfc|wendy|panera|chick-fil|popeyes|rappi/i],
+  ["Transporte y gasolina", /shell|\bbp\b|exxon|mobil|chevron|speedway|marathon|citgo|\buber\b|lyft|ventra|metra|\bcta\b|parking|toll|ipass|terpel|gasolin/i],
+  ["Vivienda", /\brent\b|apartment|mortgage|\bhoa\b|property mgmt|arriendo/i],
+  ["Servicios (luz, agua, internet, celular)", /comed|nicor|peoples gas|water|t-mobile|verizon|at&t|xfinity|comcast|spectrum|electric|claro|movistar|tigo|\bepm\b|mint mobile/i],
+  ["Salud", /cvs|walgreens|pharmacy|clinic|hospital|dental|medical|doctor|farmacia|eps\b/i],
+  ["Viajes", /airline|american air|united air|delta air|southwest|spirit air|avianca|latam|hotel|airbnb|expedia|booking\.com|marriott|hilton/i],
+  ["Educación", /universidad|tuition|udemy|coursera|unimagdalena|college/i],
+  ["Entretenimiento", /cinema|\bamc\b|steam|playstation|xbox|nintendo|ticketmaster|concert/i],
+  ["Compras", /amazon|amzn|ebay|best buy|home depot|lowe'?s|ikea|shein|temu|mercadolibre|etsy|macy|kohl/i],
+];
+const merchantKey = (d) => String(d || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[0-9#*.,\/\\-]+/g, " ").replace(/\b(pos|purchase|debit|card|visa|recurring|online|www|com|inc|llc)\b/g, " ").replace(/\s+/g, " ").trim().split(" ").slice(0, 3).join(" ");
+function autoCategory(desc, amount, rules) {
+  const key = merchantKey(desc);
+  const r = rules.find((x) => key && (key === x.pattern || key.startsWith(x.pattern) || x.pattern.startsWith(key)));
+  if (r) return r.category;
+  if (amount > 0) { if (PRULES[0][1].test(desc)) return "Pago de tarjeta"; if (PRULES[3][1].test(desc)) return "Transferencias"; return "Ingresos"; }
+  for (const [c, re] of PRULES) if (re.test(desc)) return c;
+  return "Otros";
+}
+async function categorizePersonal(env) {
+  const rows = (await env.DB.prepare("SELECT id, description, amount FROM bank_lines WHERE entity_id = 'personal' AND category IS NULL LIMIT 2000").all()).results;
+  if (!rows.length) return;
+  const rules = (await env.DB.prepare("SELECT pattern, category FROM p_rules").all()).results;
+  const ups = rows.map((r) => env.DB.prepare("UPDATE bank_lines SET category = ? WHERE id = ?").bind(autoCategory(r.description, r.amount, rules), r.id));
+  for (let i = 0; i < ups.length; i += 80) await env.DB.batch(ups.slice(i, i + 80));
+}
+// Cifrado de la URL de acceso de SimpleFIN con la clave secreta VAULT_KEY del Worker (nunca en texto plano)
+async function vaultKey(env) {
+  if (!env.VAULT_KEY || String(env.VAULT_KEY).length < 16) return null;
+  const raw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(env.VAULT_KEY)));
+  return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+const ub64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function sealSecret(env, text) {
+  const key = await vaultKey(env); if (!key) throw new Error("Falta la clave VAULT_KEY en Cloudflare.");
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text)));
+  return JSON.stringify({ iv: b64(iv), ct: b64(ct) });
+}
+async function openSecret(env, sealed) {
+  const key = await vaultKey(env); if (!key || !sealed) return null;
+  const { iv, ct } = JSON.parse(sealed);
+  return new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: ub64(iv) }, key, ub64(ct)));
+}
+const sfinHostOk = (u) => { try { const x = new URL(u); return x.protocol === "https:" && (x.hostname === "simplefin.org" || x.hostname.endsWith(".simplefin.org")); } catch { return false; } };
+function sfinMock(start) {
+  const d = (n) => Math.floor(Date.now() / 1000) - n * 86400;
+  const tx = (id, n, amt, desc) => ({ id, posted: d(n), amount: String(amt), description: desc });
+  return { errors: [], accounts: [
+    { id: "ACT-chk-1", name: "Chase Total Checking (PRUEBA)", currency: "USD", balance: "1840.25", "balance-date": d(0), org: { name: "Chase", domain: "chase.com" }, transactions: start ? [tx("t1", 2, -64.18, "JEWEL OSCO #3402 LA GRANGE"), tx("t2", 4, -12.5, "STARBUCKS STORE 2231"), tx("t3", 6, 2500, "PAYROLL DEPOSIT"), tx("t4", 8, -38.4, "SHELL OIL 57444"), tx("t5", 9, -15.49, "NETFLIX.COM")] : [] },
+    { id: "ACT-cc-1", name: "Discover It Card (PRUEBA)", currency: "USD", balance: "-523.12", "balance-date": d(0), org: { name: "Discover", domain: "discover.com" }, transactions: start ? [tx("t6", 3, -89.99, "AMAZON.COM*2K4T1 AMZN.COM/BILL"), tx("t7", 5, -42.1, "CHIPOTLE 1123"), tx("t8", 10, 300, "INTERNET PAYMENT - THANK YOU")] : [] },
+  ] };
+}
+async function sfinGet(env, path) {
+  const sealed = (await env.DB.prepare("SELECT value FROM settings WHERE key = 'sfin_access'").first())?.value;
+  if (!sealed) throw new Error("Todavía no conectas SimpleFIN.");
+  const access = await openSecret(env, sealed);
+  if (!access) throw new Error("No se pudo abrir la conexión: revisa la clave VAULT_KEY en Cloudflare.");
+  if (access === "mock" && env.DEV === "1") return sfinMock(/start-date/.test(path));
+  const u = new URL(access);
+  const auth = "Basic " + btoa(decodeURIComponent(u.username) + ":" + decodeURIComponent(u.password));
+  u.username = ""; u.password = "";
+  const r = await fetch(u.toString().replace(/\/$/, "") + path, { headers: { authorization: auth } });
+  if (r.status === 403) throw new Error("SimpleFIN rechazó el acceso: vuelve a conectar con un nuevo código.");
+  if (!r.ok) throw new Error("SimpleFIN no respondió (" + r.status + ").");
+  return r.json();
+}
+async function sfinSync(env, days = 30) {
+  const start = Math.floor((Date.now() - days * 864e5) / 1000);
+  const data = await sfinGet(env, `/accounts?start-date=${start}&pending=1`);
+  const cards = (await env.DB.prepare("SELECT id, entity_id, sfin_id FROM cards WHERE sfin_id IS NOT NULL").all()).results;
+  let added = 0; const touched = new Map();
+  for (const a of data.accounts || []) {
+    const card = cards.find((c) => c.sfin_id === a.id); if (!card) continue;
+    await env.DB.prepare("UPDATE cards SET balance = ?, balance_at = ?, currency = ? WHERE id = ?").bind(num(a.balance), a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : now(), a.currency || "USD", card.id).run();
+    const ent = card.entity_id || "personal";
+    const ids = (a.transactions || []).map((t) => `sfin:${a.id}:${t.id}`);
+    const have = new Set();
+    for (let i = 0; i < ids.length; i += 90) { const part = ids.slice(i, i + 90); (await env.DB.prepare(`SELECT ext_id FROM bank_lines WHERE ext_id IN (${part.map(() => "?").join(",")})`).bind(...part).all()).results.forEach((r) => have.add(r.ext_id)); }
+    const ins = [];
+    for (const t of a.transactions || []) {
+      const ext = `sfin:${a.id}:${t.id}`;
+      const ts = Number(t.posted) || Number(t.transacted_at) || 0; const day = ts ? new Date(ts * 1000).toISOString().slice(0, 10) : now().slice(0, 10);
+      const amount = Math.round((num(t.amount) || 0) * 100) / 100; if (!amount) continue;
+      const desc = String(t.description || t.payee || t.memo || "Movimiento").replace(/\d{9,}/g, (x) => "•••• " + x.slice(-4)).slice(0, 200);
+      if (have.has(ext)) { ins.push(env.DB.prepare("UPDATE bank_lines SET posted_on = ?, amount = ?, pending = ? WHERE ext_id = ?").bind(day, amount, Number(t.posted) ? 0 : 1, ext)); continue; }
+      ins.push(env.DB.prepare("INSERT INTO bank_lines (id, entity_id, card_id, posted_on, description, amount, ext_id, pending, created_at) VALUES (?,?,?,?,?,?,?,?,?)").bind(uid(), ent, card.id, day, desc, amount, ext, Number(t.posted) ? 0 : 1, now()));
+      added++;
+      const r = touched.get(ent) || { from: day, to: day }; if (day < r.from) r.from = day; if (day > r.to) r.to = day; touched.set(ent, r);
+    }
+    for (let i = 0; i < ins.length; i += 80) await env.DB.batch(ins.slice(i, i + 80));
+  }
+  await categorizePersonal(env);
+  for (const [ent, r] of touched) await reconcile(env, ent, r.from, r.to);
+  const status = { last_sync: now(), added, errors: (data.errors || []).slice(0, 5) };
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sfin_status', ?)").bind(JSON.stringify(status)).run();
+  return status;
 }
 
 // ---------- roles ----------
@@ -770,6 +884,9 @@ async function api(req, env, url, user) {
   const isAdmin = user.role === "admin";
   const denied = permissionError(user.role, m, p);
   if (denied) return fail(denied, 403);
+  // El espacio Personal es solo del administrador: nadie más lo ve ni puede escribir en él
+  const entOk = (e) => ["llc", "sas"].includes(e) || (e === "personal" && isAdmin);
+  if (!isAdmin && (url.searchParams.get("entity") === "personal" || p.startsWith("/personal"))) return fail("No encontrado.", 404);
 
   if (p === "/me") return json({ user });
   if (p === "/auth/logout" && m === "POST") {
@@ -782,7 +899,7 @@ async function api(req, env, url, user) {
   if (p === "/dashboard") {
     const [biz, ents, docs, dls, recent, plats, usage] = await Promise.all([
       env.DB.prepare("SELECT b.*, e.name AS entity_name FROM businesses b LEFT JOIN entities e ON e.id = b.entity_id ORDER BY b.sort, b.name").all(),
-      env.DB.prepare("SELECT * FROM entities ORDER BY id").all(),
+      env.DB.prepare("SELECT * FROM entities WHERE id != 'personal' ORDER BY id").all(),
       env.DB.prepare("SELECT d.entity_id, d.title, d.expires_on FROM company_docs d WHERE d.version = (SELECT MAX(version) FROM company_docs x WHERE x.group_id = d.group_id)").all(),
       env.DB.prepare("SELECT * FROM deadlines WHERE done = 0 ORDER BY due_on LIMIT 8").all(),
       env.DB.prepare("SELECT i.id, i.title, i.invoice_number, i.issue_date, i.created_at, i.status, b.name AS business, b.entity_id, s.name AS supplier FROM invoices i JOIN businesses b ON b.id = i.business_id LEFT JOIN suppliers s ON s.id = i.supplier_id ORDER BY i.created_at DESC LIMIT 40").all(),
@@ -799,7 +916,7 @@ async function api(req, env, url, user) {
       .map((t) => ({ title: `${t.name} · ${t.label}`, entity_id: t.entity_id, due_on: t.due_date, kind: "impuesto", overdue: t.due_date < new Date().toISOString().slice(0, 10) }));
     await ensureCycles(env);
     const cardDue = (await env.DB.prepare("SELECT cc.due_date, c.nickname, c.last4, c.entity_id FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.active = 1 AND c.card_type != 'debito' AND cc.paid = 0 AND cc.due_date <= ? AND cc.closing_date <= ? ORDER BY cc.due_date LIMIT 6").bind(new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10), new Date().toISOString().slice(0, 10)).all()).results
-      .map((c) => ({ title: `Pagar el total de la tarjeta ${c.nickname} •••• ${c.last4}`, due_on: c.due_date, kind: "tarjeta", entity_id: c.entity_id || null, link: `#/empresa/${c.entity_id || "llc"}/tarjetas`, overdue: c.due_date < new Date().toISOString().slice(0, 10) }));
+      .map((c) => ({ title: `Pagar el total de la tarjeta ${c.nickname} •••• ${c.last4}`, due_on: c.due_date, kind: "tarjeta", entity_id: c.entity_id || null, link: c.entity_id === "personal" ? "#/personal/cuentas" : `#/empresa/${c.entity_id || "llc"}/tarjetas`, overdue: c.due_date < new Date().toISOString().slice(0, 10) }));
     const staleLots = (await env.DB.prepare("SELECT l.id, l.business_id, l.name, l.stage, l.dates, l.created_at, b.entity_id FROM lots l JOIN businesses b ON b.id = l.business_id WHERE l.stage IN ('comprado','etiquetado')").all()).results
       .map((l) => ({ ...l, d: JSON.parse(l.dates || "{}").comprado || l.created_at.slice(0, 10) })).filter((l) => (Date.now() - new Date(l.d)) / 864e5 > 14)
       .map((l) => ({ title: `${l.name}: lleva ${Math.floor((Date.now() - new Date(l.d)) / 864e5)} días sin enviarse a Amazon`, due_on: l.d, kind: "lote", entity_id: l.entity_id, link: `#/negocio/${l.business_id}/lotes`, overdue: true }));
@@ -837,7 +954,7 @@ async function api(req, env, url, user) {
     return json({ ok: true });
   }
   // Empresas
-  if (p === "/entities") return json({ entities: (await env.DB.prepare("SELECT * FROM entities ORDER BY id").all()).results.map((e) => ({ ...e, details: JSON.parse(e.details || "{}") })), folders: FOLDERS });
+  if (p === "/entities") return json({ entities: (await env.DB.prepare("SELECT * FROM entities ORDER BY CASE id WHEN 'llc' THEN 1 WHEN 'sas' THEN 2 ELSE 3 END").all()).results.filter((e) => e.id !== "personal" || isAdmin).map((e) => ({ ...e, details: JSON.parse(e.details || "{}") })), folders: FOLDERS });
   let mm;
   if ((mm = p.match(/^\/entities\/([a-z]+)$/)) && m === "PUT") {
     const b = await body();
@@ -862,7 +979,7 @@ async function api(req, env, url, user) {
     const prev = group ? await env.DB.prepare("SELECT * FROM company_docs WHERE group_id = ? ORDER BY version DESC LIMIT 1").bind(group).first() : null;
     if (prev) version = prev.version + 1; else group = uid();
     const entity = fd.get("entity_id") || prev?.entity_id;
-    if (!["llc", "sas"].includes(entity)) return fail("Empresa no válida.");
+    if (!entOk(entity)) return fail("Empresa no válida.");
     let title = String(fd.get("title") || prev?.title || "").trim();
     const autoTitle = !title;
     if (autoTitle) title = titleFromFilename(file && file.name) || "Documento sin nombre";
@@ -946,7 +1063,7 @@ async function api(req, env, url, user) {
   }
   if (p === "/tax/obligations" && m === "POST") {
     const b = await body();
-    if (!["llc", "sas"].includes(b.entity_id)) return fail("Empresa no válida.");
+    if (!entOk(b.entity_id)) return fail("Empresa no válida.");
     const r = await createObligation(env, b.entity_id, { ...b, effective_date: b.start_date }, null);
     if (!r) return fail("Escribe el nombre y la fecha de inicio.");
     return json(r);
@@ -1131,7 +1248,7 @@ async function api(req, env, url, user) {
   if (p === "/cards" && m === "GET") {
     await ensureCycles(env);
     const [cards, cycles, uses] = await Promise.all([
-      (url.searchParams.get("entity") ? env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id IS NULL OR entity_id = '' OR entity_id = ?) ORDER BY nickname").bind(url.searchParams.get("entity")) : env.DB.prepare("SELECT * FROM cards WHERE active = 1 ORDER BY nickname")).all(),
+      (url.searchParams.get("entity") ? env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id IS NULL OR entity_id = '' OR entity_id = ?) ORDER BY nickname").bind(url.searchParams.get("entity")) : env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND COALESCE(entity_id, '') != 'personal' ORDER BY nickname")).all(),
       env.DB.prepare("SELECT cc.*, f.filename FROM card_cycles cc LEFT JOIN files f ON f.id = cc.file_id ORDER BY cc.closing_date DESC").all(),
       env.DB.prepare("SELECT card_id, COUNT(*) AS n, COALESCE(SUM(total),0) AS total FROM invoices WHERE card_id IS NOT NULL GROUP BY card_id").all(),
     ]);
@@ -1248,7 +1365,7 @@ async function api(req, env, url, user) {
     const fd = await req.formData(); const g = (k) => { const v = fd.get(k); return v == null || v === "" ? null : String(v); };
     const kind = MOVE_KINDS.includes(g("kind")) ? g("kind") : null;
     const amount = num(g("amount")); const date = isoDate(g("moved_on"));
-    if (!kind || !amount || !date || !g("concept") || !["llc", "sas"].includes(g("entity_id"))) return fail("Completa tipo, fecha, monto y concepto.");
+    if (!kind || !amount || !date || !g("concept") || !entOk(g("entity_id"))) return fail("Completa tipo, fecha, monto y concepto.");
     const file = fd.get("file");
     const fileId = file && file.size ? await storeFile(env, user, file, fd.get("original_size")) : null;
     const moveId = uid();
@@ -1280,7 +1397,7 @@ async function api(req, env, url, user) {
     const amount = b.cycle === "gratis" ? 0 : Math.abs(num(b.amount) || 0); const date = isoDate(b.charge_date) || "";
     if (!String(b.name || "").trim()) return fail("Escribe el nombre de la herramienta.");
     const ent = b.entity_id;
-    if (!["llc", "sas"].includes(ent)) return fail("Elige la empresa.");
+    if (!entOk(ent)) return fail("Elige la empresa.");
     const plats = (await env.DB.prepare("SELECT id, business_id FROM platforms").all()).results;
     const ids = [...new Set((Array.isArray(b.platform_ids) ? b.platform_ids : []).map(String))].filter((x) => plats.some((p) => p.id === x));
     if (b.cycle === "gratis") b.amount = 0;
@@ -1305,7 +1422,7 @@ async function api(req, env, url, user) {
   if (p === "/bank/lines" && m === "POST") {
     const fd = await req.formData();
     const ent = String(fd.get("entity_id") || ""); const cardId = String(fd.get("card_id") || "") || null;
-    if (!["llc", "sas"].includes(ent)) return fail("Elige la empresa.");
+    if (!entOk(ent)) return fail("Elige la empresa.");
     let lines; try { lines = JSON.parse(String(fd.get("lines") || "[]")); } catch { lines = []; }
     lines = lines.map((l) => ({ posted_on: isoDate(l.posted_on), description: String(l.description || "").replace(/\d{9,}/g, (d) => "•••• " + d.slice(-4)).trim().slice(0, 200), amount: Math.round((num(l.amount) || 0) * 100) / 100 })).filter((l) => l.posted_on && l.amount && l.description).slice(0, 3000);
     if (!lines.length) return fail("No hay movimientos para guardar.");
@@ -1322,6 +1439,7 @@ async function api(req, env, url, user) {
       ins.push(env.DB.prepare("INSERT INTO bank_lines (id, entity_id, card_id, file_id, posted_on, description, amount, created_at) VALUES (?,?,?,?,?,?,?,?)").bind(uid(), ent, cardId, fileId, l.posted_on, l.description, l.amount, now()));
     }
     for (let i = 0; i < ins.length; i += 80) await env.DB.batch(ins.slice(i, i + 80));
+    if (ent === "personal") await categorizePersonal(env);
     // El archivo queda también como estado de cuenta del ciclo que le corresponde, si ese ciclo no tiene uno
     if (cardId && fileId) {
       const last = lines.reduce((a, l) => (l.posted_on > a ? l.posted_on : a), "0000");
@@ -1384,6 +1502,117 @@ async function api(req, env, url, user) {
     for (const pid of JSON.parse(s.payout_ids || "[]")) await env.DB.prepare("DELETE FROM payouts WHERE id = ?").bind(pid).run();
     if (s.file_id) await removeFile(s.file_id);
     await env.DB.prepare("DELETE FROM settlements WHERE id = ?").bind(mm[1]).run();
+    return json({ ok: true });
+  }
+
+  // ---------- espacio Personal (solo administrador; la guarda de arriba bloquea a los demás) ----------
+  if (p.startsWith("/personal") && !isAdmin) return fail("No encontrado.", 404);
+  if (p === "/personal/summary" && m === "GET") {
+    await categorizePersonal(env);
+    const month = /^\d{4}-\d{2}$/.test(url.searchParams.get("month") || "") ? url.searchParams.get("month") : now().slice(0, 7);
+    const from = month + "-01", to = addMonthsClamp(from, 1, 1) < from ? from : shiftDate(addMonthsClamp(from, 1, 1), -1);
+    const today = now().slice(0, 10);
+    const [accts, lines, moves, subs, cycles, st] = await Promise.all([
+      env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND entity_id = 'personal' ORDER BY card_type DESC, nickname").all(),
+      env.DB.prepare("SELECT bl.*, c.nickname AS card, c.last4, c.issuer FROM bank_lines bl LEFT JOIN cards c ON c.id = bl.card_id WHERE bl.entity_id = 'personal' AND bl.posted_on BETWEEN ? AND ? AND bl.status NOT IN ('ignorado') ORDER BY bl.posted_on DESC, bl.created_at DESC").bind(from, to).all(),
+      env.DB.prepare("SELECT * FROM money_moves WHERE entity_id = 'personal' AND moved_on BETWEEN ? AND ? ORDER BY moved_on DESC").bind(from, to).all(),
+      env.DB.prepare("SELECT * FROM subscriptions WHERE entity_id = 'personal'").all(),
+      env.DB.prepare("SELECT cc.*, c.nickname, c.last4, c.issuer FROM card_cycles cc JOIN cards c ON c.id = cc.card_id WHERE c.entity_id = 'personal' AND c.card_type != 'debito' AND cc.paid = 0 AND cc.due_date BETWEEN ? AND ? ORDER BY cc.due_date").bind(shiftDate(today, -10), shiftDate(today, 40)).all(),
+      env.DB.prepare("SELECT key, value FROM settings WHERE key IN ('sfin_access', 'sfin_status')").all(),
+    ]);
+    const all = [...lines.results.map((l) => ({ kind: "banco", id: l.id, date: l.posted_on, desc: l.description, amount: l.amount, category: l.category || "Otros", card: l.card ? `${l.card} •••• ${l.last4}` : "", status: l.status, pending: l.pending })),
+      ...moves.results.map((x) => ({ kind: "manual", id: x.id, date: x.moved_on, desc: x.concept, amount: x.kind === "ingreso" ? x.amount : -x.amount, category: x.category || (x.kind === "ingreso" ? "Ingresos" : "Otros"), card: "" }))];
+    const byCat = {}; let income = 0, spend = 0;
+    for (const x of all) {
+      if (x.status === "empresa") continue;
+      if (x.category === "Ingresos" && x.amount > 0) income += x.amount;
+      else if (!NOT_SPENDING.includes(x.category)) { spend += -x.amount; byCat[x.category] = (byCat[x.category] || 0) - x.amount; }
+    }
+    const sMap = Object.fromEntries(st.results.map((r) => [r.key, r.value]));
+    return json({ month, from, to, accounts: accts.results, items: all.sort((a, z) => z.date.localeCompare(a.date)).slice(0, 400), by_category: Object.entries(byCat).map(([k, v]) => ({ category: k, total: Math.round(v * 100) / 100 })).filter((x) => x.total > 0.004).sort((a, z) => z.total - a.total),
+      income: Math.round(income * 100) / 100, spend: Math.round(spend * 100) / 100, due: cycles.results, sub_charges: subs.results.flatMap((s) => subCharges(s, from, to).map((d) => ({ date: d, name: s.name, amount: s.amount, currency: s.currency }))),
+      categories: PCATS, sfin: { connected: !!sMap.sfin_access, vault: !!(await vaultKey(env)), status: sMap.sfin_status ? JSON.parse(sMap.sfin_status) : null } });
+  }
+  if ((mm = p.match(/^\/personal\/lines\/([\w-]+)$/)) && m === "PUT") {
+    const b = await body();
+    if (!PCATS.includes(b.category)) return fail("Categoría no válida.");
+    const l = await env.DB.prepare("SELECT description FROM bank_lines WHERE id = ? AND entity_id = 'personal'").bind(mm[1]).first();
+    if (!l) return fail("Movimiento no encontrado.", 404);
+    await env.DB.prepare("UPDATE bank_lines SET category = ? WHERE id = ?").bind(b.category, mm[1]).run();
+    let same = 0;
+    if (b.learn) {
+      const key = merchantKey(l.description);
+      if (key) {
+        await env.DB.prepare("INSERT INTO p_rules (id, pattern, category, created_at) VALUES (?,?,?,?) ON CONFLICT(pattern) DO UPDATE SET category = excluded.category").bind(uid(), key, b.category, now()).run();
+        const others = (await env.DB.prepare("SELECT id, description FROM bank_lines WHERE entity_id = 'personal' AND id != ?").bind(mm[1]).all()).results.filter((x) => merchantKey(x.description) === key);
+        for (const o of others) await env.DB.prepare("UPDATE bank_lines SET category = ? WHERE id = ?").bind(b.category, o.id).run();
+        same = others.length;
+      }
+    }
+    return json({ ok: true, same });
+  }
+  // Un gasto personal que en realidad fue de la empresa: queda como gasto de la empresa pagado por el dueño
+  if ((mm = p.match(/^\/personal\/lines\/([\w-]+)\/company$/)) && m === "POST") {
+    const b = await body();
+    if (!["llc", "sas"].includes(b.entity_id)) return fail("Elige la empresa.");
+    const l = await env.DB.prepare("SELECT * FROM bank_lines WHERE id = ? AND entity_id = 'personal'").bind(mm[1]).first();
+    if (!l) return fail("Movimiento no encontrado.", 404);
+    const out = l.amount < 0;
+    await env.DB.prepare("INSERT INTO money_moves (id, entity_id, kind, moved_on, amount, currency, concept, category, notes, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(uid(), b.entity_id, out ? "gasto" : "ingreso", l.posted_on, Math.abs(l.amount), "USD", l.description.slice(0, 200), b.category || (out ? "Otros gastos" : "Otros ingresos"), out ? "Pagado con una cuenta personal: el contador lo registra como aporte del dueño." : "Recibido en una cuenta personal.", user.email, now()).run();
+    await env.DB.prepare("UPDATE bank_lines SET category = 'Empresa (Starkum)', status = 'empresa', locked = 1, match_label = ? WHERE id = ?").bind("Registrado en " + (b.entity_id === "llc" ? "Starkum Holdings LLC" : "Starkum Group SAS"), mm[1]).run();
+    return json({ ok: true });
+  }
+  if ((mm = p.match(/^\/personal\/accounts\/([\w-]+)\/balance$/)) && m === "PUT") {
+    const b = await body();
+    await env.DB.prepare("UPDATE cards SET balance = ?, balance_at = ? WHERE id = ? AND entity_id = 'personal'").bind(num(b.balance), now(), mm[1]).run();
+    return json({ ok: true });
+  }
+  if (p === "/personal/sfin/connect" && m === "POST") {
+    const b = await body();
+    if (!(await vaultKey(env))) return fail("Primero agrega la clave VAULT_KEY en Cloudflare (los pasos están en esta página).");
+    const token = String(b.setup_token || "").trim();
+    let access;
+    if (env.DEV === "1" && token === "PRUEBA") access = "mock";
+    else {
+      let claim; try { claim = atob(token); } catch { return fail("El código no es válido. Cópialo completo desde SimpleFIN."); }
+      if (!sfinHostOk(claim)) return fail("El código no es de SimpleFIN.");
+      const r = await fetch(claim, { method: "POST", headers: { "content-length": "0" } });
+      if (!r.ok) return fail(r.status === 403 ? "Ese código ya se usó o venció. Crea uno nuevo en SimpleFIN." : "SimpleFIN no aceptó el código (" + r.status + ").");
+      access = (await r.text()).trim();
+      if (!sfinHostOk(access)) return fail("SimpleFIN devolvió una respuesta inesperada.");
+    }
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sfin_access', ?)").bind(await sealSecret(env, access)).run();
+    return json({ ok: true });
+  }
+  if (p === "/personal/sfin/accounts" && m === "GET") {
+    const data = await sfinGet(env, "/accounts?balances-only=1").catch((e) => ({ error: e.message }));
+    if (data.error) return fail(data.error, 502);
+    const cards = (await env.DB.prepare("SELECT id, nickname, last4, entity_id, sfin_id FROM cards WHERE sfin_id IS NOT NULL").all()).results;
+    return json({ accounts: (data.accounts || []).map((a) => ({ id: a.id, name: a.name, org: a.org?.name || a.org?.domain || "", currency: a.currency, balance: num(a.balance), card: cards.find((c) => c.sfin_id === a.id) || null })), errors: data.errors || [] });
+  }
+  if (p === "/personal/sfin/map" && m === "POST") {
+    const b = await body();
+    if (!b.sfin_id) return fail("Falta la cuenta.");
+    await env.DB.prepare("UPDATE cards SET sfin_id = NULL WHERE sfin_id = ?").bind(b.sfin_id).run();
+    let cardId = b.card_id || null;
+    if (!cardId && b.create) {
+      const c = b.create; const last4 = String(c.last4 || "").replace(/\D/g, "").slice(-4) || "0000";
+      cardId = uid();
+      await env.DB.prepare("INSERT INTO cards (id, nickname, issuer, last4, owner, entity_id, card_type, created_at) VALUES (?,?,?,?,?,?,?,?)").bind(cardId, String(c.nickname || "Cuenta").slice(0, 60), c.issuer || null, last4, c.entity_id === "personal" ? "personal" : "empresa", ["llc", "sas", "personal"].includes(c.entity_id) ? c.entity_id : "personal", c.card_type === "credito" ? "credito" : "debito", now()).run();
+    }
+    if (cardId) await env.DB.prepare("UPDATE cards SET sfin_id = ? WHERE id = ?").bind(b.sfin_id, cardId).run();
+    return json({ ok: true, card_id: cardId });
+  }
+  if (p === "/personal/sfin/sync" && m === "POST") {
+    const st = (await env.DB.prepare("SELECT value FROM settings WHERE key = 'sfin_status'").first())?.value;
+    const last = st ? JSON.parse(st).last_sync : null;
+    if (last && Date.now() - Date.parse(last) < 10 * 60000 && env.DEV !== "1") return fail("Ya se sincronizó hace menos de 10 minutos. SimpleFIN limita las consultas por día.");
+    const first = !(await env.DB.prepare("SELECT id FROM bank_lines WHERE ext_id IS NOT NULL LIMIT 1").first());
+    try { return json(await sfinSync(env, first ? 90 : 30)); } catch (e) { return fail(e.message, 502); }
+  }
+  if (p === "/personal/sfin" && m === "DELETE") {
+    await env.DB.batch([env.DB.prepare("DELETE FROM settings WHERE key IN ('sfin_access', 'sfin_status')"), env.DB.prepare("UPDATE cards SET sfin_id = NULL")]);
     return json({ ok: true });
   }
 
@@ -1991,5 +2220,8 @@ export default {
       return fail("Error interno: " + (e.message || e), 500);
     }
   },
-  async scheduled(_event, env, ctx) { ctx.waitUntil(dailyDigest(env)); },
+  async scheduled(_event, env, ctx) {
+    ctx.waitUntil(dailyDigest(env));
+    ctx.waitUntil((async () => { try { await ensureSchema(env); if (await env.DB.prepare("SELECT value FROM settings WHERE key = 'sfin_access'").first()) await sfinSync(env, 30); } catch (e) { console.log("sincronización SimpleFIN:", e.message); } })());
+  },
 };
