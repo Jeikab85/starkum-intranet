@@ -1663,6 +1663,8 @@ async function api(req, env, url, user) {
     let fileId = cyc0?.file_id || null; let storedNew = false;
     const file = fd.get("file");
     if (!fileId && file && file.size) { fileId = await storeFile(env, user, file, fd.get("original_size")); storedNew = true; }
+    // "Volver a leer": se borran los movimientos que salieron de este mismo estado de cuenta (no los del banco conectado)
+    if (fd.get("replace") === "1" && cyc0?.file_id) await env.DB.prepare("DELETE FROM bank_lines WHERE card_id = ? AND file_id = ? AND ext_id IS NULL AND COALESCE(status, '') NOT IN ('empresa', 'conciliado')").bind(cardId, cyc0.file_id).run();
     // Movimientos sin repetir lo que ya está en esa cuenta (del banco conectado o de otro extracto)
     let added = 0, dup = 0;
     if (lines.length) {

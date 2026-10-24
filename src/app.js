@@ -1804,9 +1804,11 @@ function bankFromPdf(textLines, { credit, dmy }) {
     let inflow;
     if (credit) inflow = neg || section === "in" || PAY_RE.test(desc);
     else inflow = neg ? false : section === "in" ? true : section === "out" ? false : IN_HINT.test(desc);
-    lines.push({ posted_on: d, description: desc.replace(/\d{9,}/g, (x) => "•••• " + x.slice(-4)), amount: inflow ? v : -v });
+    lines.push({ posted_on: d, description: desc.replace(/\d{9,}/g, (x) => "•••• " + x.slice(-4)), amount: inflow ? v : -v, _neg: neg, _v: v });
   }
-  return lines;
+  // Cuenta de débito con montos firmados (como Chase: retiros con "-", depósitos sin signo): el signo manda, no las secciones
+  if (!credit && lines.some((l) => l._neg) && lines.some((l) => !l._neg)) for (const l of lines) l.amount = l._neg ? -l._v : l._v;
+  return lines.map(({ _neg, _v, ...l }) => l);
 }
 // Fechas de un estado de cuenta (cierre, pago y saldo) sacadas del texto del PDF
 function statementMeta(tl) {
@@ -1829,10 +1831,12 @@ async function bulkStatementsDialog(ent) {
   const cardSel = h("select", { name: "card_id", required: true }, h("option", { value: "" }, "Elige la cuenta o tarjeta"), byBank(cards).map(([bank, list]) => h("optgroup", { label: bank }, list.map((c) => h("option", { value: c.id }, `${c.nickname} •••• ${c.last4}`)))));
   const filesIn = h("input", { type: "file", name: "files", multiple: true, accept: "application/pdf,.pdf,.csv,.xlsx,.xls" });
   const log = h("div", { class: "stack", style: "gap:4px;max-height:40vh;overflow:auto" });
+  const replace = h("input", { type: "checkbox", name: "replace", style: "width:auto" });
   const say = (txt, color) => { log.append(h("div", { class: "small", style: color ? "color:var(" + color + ")" : "" }, txt)); log.scrollTop = 1e9; };
   modal("Cargar estados de cuenta", () => h("div", { class: "stack" },
     h("p", { class: "small muted", style: "margin:0" }, "Elige la cuenta y sube todos sus estados de cuenta (PDF) de una vez. De cada uno se guardan el archivo, sus movimientos (sin repetir los que ya están) y las fechas de cierre y de pago."),
-    fld("Cuenta o tarjeta", cardSel), fld("Estados de cuenta (puedes elegir varios)", filesIn), log),
+    fld("Cuenta o tarjeta", cardSel), fld("Estados de cuenta (puedes elegir varios)", filesIn),
+    h("label", { class: "row small", style: "gap:8px" }, replace, "Volver a leer: reemplaza los movimientos que vinieron de estos mismos estados de cuenta"), log),
   async (fd, form) => {
     const card = cards.find((c) => c.id === cardSel.value); if (!card) throw new Error("Elige la cuenta.");
     const files = [...filesIn.files].sort((a, z) => a.name.localeCompare(z.name)); if (!files.length) throw new Error("Elige los archivos.");
@@ -1850,6 +1854,7 @@ async function bulkStatementsDialog(ent) {
         } else { const r = bankFromRows(await readRows(f), { dmy: false }); lines = r ? r.lines : []; }
         const up = new FormData(); up.append("entity_id", ent.id); up.append("card_id", card.id);
         up.append("lines", JSON.stringify(lines.map(({ posted_on, description, amount }) => ({ posted_on, description, amount }))));
+        if (replace.checked) up.append("replace", "1");
         if (meta.closing) up.append("closing_date", meta.closing); if (meta.due) up.append("due_date", meta.due); if (meta.balance != null) up.append("balance", meta.balance);
         if (/\.pdf$/i.test(f.name)) { const prep = await prepareUpload(f); up.append("file", prep.file, f.name); up.append("original_size", prep.originalSize ?? f.size); }
         const r = await api("/bank/statement", { method: "POST", body: up });
