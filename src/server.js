@@ -482,9 +482,10 @@ async function sfinStore(env, data, updateBalances, touched) {
       const amount = Math.round((num(t.amount) || 0) * 100) / 100; if (!amount) continue;
       const desc = String(t.description || t.payee || t.memo || "Movimiento").replace(/\d{9,}/g, (x) => "•••• " + x.slice(-4)).slice(0, 200);
       if (have.has(ext)) { ins.push(env.DB.prepare("UPDATE bank_lines SET posted_on = ?, amount = ?, pending = ? WHERE ext_id = ?").bind(day, amount, Number(t.posted) ? 0 : 1, ext)); continue; }
-      // En la empresa puede existir ya el mismo movimiento leído de un extracto: se une a él en vez de duplicarlo
+      // Puede existir ya el mismo movimiento leído de un extracto, o traído antes por otra conexión del banco
+      // (cuando la cuenta se vuelve a vincular cambia su identificador): se une a él en vez de duplicarlo
       {
-        const same = await env.DB.prepare("SELECT id FROM bank_lines WHERE card_id = ? AND ext_id IS NULL AND ABS(amount - ?) < 0.005 AND posted_on BETWEEN ? AND ? ORDER BY ABS(julianday(posted_on) - julianday(?)) LIMIT 1").bind(card.id, amount, shiftDate(day, -4), shiftDate(day, 4), day).first();
+        const same = await env.DB.prepare("SELECT id FROM bank_lines WHERE card_id = ? AND (ext_id IS NULL OR (ext_id LIKE 'sfin:%' AND ext_id NOT LIKE ?)) AND ABS(amount - ?) < 0.005 AND posted_on BETWEEN ? AND ? ORDER BY ABS(julianday(posted_on) - julianday(?)), ext_id IS NULL LIMIT 1").bind(card.id, `sfin:${a.id}:%`, amount, shiftDate(day, -4), shiftDate(day, 4), day).first();
         if (same) { ins.push(env.DB.prepare("UPDATE bank_lines SET ext_id = ?, pending = ? WHERE id = ?").bind(ext, Number(t.posted) ? 0 : 1, same.id)); have.add(ext); continue; }
       }
       ins.push(env.DB.prepare("INSERT INTO bank_lines (id, entity_id, card_id, posted_on, description, amount, ext_id, pending, created_at) VALUES (?,?,?,?,?,?,?,?,?)").bind(uid(), ent, card.id, day, desc, amount, ext, Number(t.posted) ? 0 : 1, now()));
