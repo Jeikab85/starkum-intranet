@@ -467,6 +467,11 @@ async function sfinStore(env, data, updateBalances, touched) {
       const amount = Math.round((num(t.amount) || 0) * 100) / 100; if (!amount) continue;
       const desc = String(t.description || t.payee || t.memo || "Movimiento").replace(/\d{9,}/g, (x) => "•••• " + x.slice(-4)).slice(0, 200);
       if (have.has(ext)) { ins.push(env.DB.prepare("UPDATE bank_lines SET posted_on = ?, amount = ?, pending = ? WHERE ext_id = ?").bind(day, amount, Number(t.posted) ? 0 : 1, ext)); continue; }
+      // En la empresa puede existir ya el mismo movimiento leído de un extracto: se une a él en vez de duplicarlo
+      if (ent !== "personal") {
+        const same = await env.DB.prepare("SELECT id FROM bank_lines WHERE card_id = ? AND ext_id IS NULL AND ABS(amount - ?) < 0.005 AND posted_on BETWEEN ? AND ? ORDER BY ABS(julianday(posted_on) - julianday(?)) LIMIT 1").bind(card.id, amount, shiftDate(day, -4), shiftDate(day, 4), day).first();
+        if (same) { ins.push(env.DB.prepare("UPDATE bank_lines SET ext_id = ?, pending = ? WHERE id = ?").bind(ext, Number(t.posted) ? 0 : 1, same.id)); have.add(ext); continue; }
+      }
       ins.push(env.DB.prepare("INSERT INTO bank_lines (id, entity_id, card_id, posted_on, description, amount, ext_id, pending, created_at) VALUES (?,?,?,?,?,?,?,?,?)").bind(uid(), ent, card.id, day, desc, amount, ext, Number(t.posted) ? 0 : 1, now()));
       added++;
       const r = touched.get(ent) || { from: day, to: day }; if (day < r.from) r.from = day; if (day > r.to) r.to = day; touched.set(ent, r);
@@ -1556,6 +1561,29 @@ async function api(req, env, url, user) {
 
   // ---------- espacio Personal (solo administrador; la guarda de arriba bloquea a los demás) ----------
   if (p.startsWith("/personal") && !isAdmin) return fail("No encontrado.", 404);
+  // Bancos de una empresa: saldos, entradas y salidas por cuenta (solo administrador)
+  if (p === "/banks" && m === "GET") {
+    if (!isAdmin) return fail("No encontrado.", 404);
+    const ent = url.searchParams.get("entity"); if (!["llc", "sas"].includes(ent)) return fail("Elige la empresa.");
+    const yr = /^\d{4}$/.test(url.searchParams.get("year") || "") ? url.searchParams.get("year") : null;
+    const month = /^\d{4}-\d{2}$/.test(url.searchParams.get("month") || "") ? url.searchParams.get("month") : now().slice(0, 7);
+    const from = yr ? `${yr}-01-01` : month + "-01", to = yr ? `${yr}-12-31` : shiftDate(addMonthsClamp(month + "-01", 1, 1), -1);
+    const scope = url.searchParams.get("scope");
+    let accts = (await env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND entity_id = ? AND COALESCE(owner, 'empresa') != 'personal' ORDER BY card_type DESC, nickname").bind(ent).all()).results;
+    if (scope === "resumen") accts = accts.filter((a) => !a.hide_summary);
+    const ids = new Set(accts.map((a) => a.id));
+    const lines = (await env.DB.prepare("SELECT * FROM bank_lines WHERE entity_id = ? AND posted_on BETWEEN ? AND ? AND status != 'ignorado' ORDER BY posted_on DESC").bind(ent, from, to).all()).results.filter((l) => !l.card_id || ids.has(l.card_id) || scope !== "resumen");
+    const r2 = (v) => Math.round(v * 100) / 100;
+    const KIND = { factura: "Facturas de proveedores", suscripcion: "Suscripciones", movimiento: "Movimientos registrados", impuesto: "Impuestos", pago_amazon: "Pagos de Amazon", pago_tarjeta: "Pagos de tarjeta" };
+    const sum = (l) => { const o = { n: l.length, in: 0, out: 0, missing: 0, personal: 0 }; for (const x of l) { if (x.status === "personal") { o.personal++; continue; } if (x.amount > 0) o.in += x.amount; else o.out -= x.amount; if (x.status === "sin_soporte") o.missing++; } return { ...o, in: r2(o.in), out: r2(o.out), net: r2(o.in - o.out) }; };
+    const byKind = {}; for (const x of lines) { if (x.status === "personal") continue; const k = x.status === "sin_soporte" ? "Sin soporte todavía" : KIND[x.match_kind] || (x.match_label || "Otros"); const side = x.amount > 0 ? "in" : "out"; byKind[k] = byKind[k] || { label: k, in: 0, out: 0, n: 0 }; byKind[k][side] += Math.abs(x.amount); byKind[k].n++; }
+    const sMap = Object.fromEntries((await env.DB.prepare("SELECT key, value FROM settings WHERE key IN ('sfin_access', 'sfin_status')").all()).results.map((r) => [r.key, r.value]));
+    return json({ entity: ent, month, year: yr, from, to, accounts: accts, total: sum(lines),
+      per_account: accts.map((a) => ({ id: a.id, ...sum(lines.filter((l) => l.card_id === a.id)) })),
+      by_kind: Object.values(byKind).map((k) => ({ ...k, in: r2(k.in), out: r2(k.out) })).sort((a, z) => z.in + z.out - a.in - a.out),
+      recent: lines.slice(0, 10).map((l) => ({ id: l.id, posted_on: l.posted_on, description: l.description, amount: l.amount, status: l.status, match_label: l.match_label, card_id: l.card_id, pending: l.pending })),
+      sfin: { connected: !!sMap.sfin_access, status: sMap.sfin_status ? JSON.parse(sMap.sfin_status) : null } });
+  }
   if (p === "/personal/summary" && m === "GET") {
     await categorizePersonal(env);
     const yr = /^\d{4}$/.test(url.searchParams.get("year") || "") ? url.searchParams.get("year") : null;

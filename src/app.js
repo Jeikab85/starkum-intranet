@@ -352,9 +352,9 @@ function addDeadline() {
   async (fd) => { await api("/deadlines", { method: "POST", body: Object.fromEntries(fd) }); toast("Fecha agregada."); route(); });
 }
 
-const ENT_TABS = [["inicio", "Inicio"], ["documentos", "Documentos"], ["proveedores", "Proveedores"], ["tarjetas", "Tarjetas"], ["suscripciones", "Suscripciones"], ["contador", "Para el contador"]];
+const ENT_TABS = [["inicio", "Inicio"], ["documentos", "Documentos"], ["proveedores", "Proveedores"], ["tarjetas", "Tarjetas"], ["bancos", "Bancos"], ["suscripciones", "Suscripciones"], ["contador", "Para el contador"]];
 async function pageEntity(id, tab, q) {
-  tab = ENT_TABS.some((t) => t[0] === tab) ? tab : "inicio";
+  tab = ENT_TABS.some((t) => t[0] === tab) && (tab !== "bancos" || isAdmin()) ? tab : "inicio";
   setEntity(id);
   const act = `empresa-${id}-${tab}`;
   shell(loading(), act);
@@ -366,9 +366,9 @@ async function pageEntity(id, tab, q) {
     h("div", { class: "head" }, h("div", { class: "row", style: "gap:14px;align-items:center;flex-wrap:nowrap;min-width:0" }, entityLogo(ent, 56), h("div", { style: "min-width:0" }, h("span", { class: "eyebrow" }, "Empresa · " + ent.country), h("h1", null, ent.name), entityWeb(ent, "font-size:14px"))),
       tab === "inicio" ? searchBox() : "",
       tab === "documentos" ? h("button", { class: "btn primary only-upload", type: "button", onclick: () => docDialog(id, folder) }, "Subir documento") : ""),
-    h("div", { class: "tabs", role: "tablist" }, ENT_TABS.map(([k, l]) => h("a", { href: `#/empresa/${id}/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
+    h("div", { class: "tabs", role: "tablist" }, ENT_TABS.filter(([k]) => k !== "bancos" || isAdmin()).map(([k, l]) => h("a", { href: `#/empresa/${id}/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
   if (tab !== "documentos") {
-    const content = tab === "inicio" ? await companyHome(ent) : tab === "proveedores" ? await entitySuppliers(ent, q) : tab === "tarjetas" ? await cardsView(id) : tab === "suscripciones" ? await subsView(ent, null, q) : await accountantView(ent, q);
+    const content = tab === "inicio" ? await companyHome(ent) : tab === "proveedores" ? await entitySuppliers(ent, q) : tab === "tarjetas" ? await cardsView(id) : tab === "bancos" ? await companyBanks(ent, q) : tab === "suscripciones" ? await subsView(ent, null, q) : await accountantView(ent, q);
     shell(h("div", { class: "page" }, ...head, content), act);
     return;
   }
@@ -1480,6 +1480,77 @@ async function sfinView() {
       h("p", { class: "small muted", style: "margin:0" }, "Si una cuenta es de la empresa (por ejemplo, la Chase de Starkum), asígnala a la cuenta de la LLC: sus movimientos llegan solos a la conciliación del banco de la empresa."));
   }
   return h("div", { class: "stack", style: "gap:16px" }, vaultBox, connectBox, accBox);
+}
+// ---------- bancos de la empresa (como "Mis finanzas", pero de la empresa) ----------
+async function companyBanks(ent, q) {
+  const usd = (v) => money(v, ent.id === "sas" ? "COP" : "USD");
+  const month = /^\d{4}-\d{2}$/.test(q.get("mes") || "") ? q.get("mes") : new Date().toISOString().slice(0, 7);
+  const year = /^\d{4}$/.test(q.get("anio") || "") ? q.get("anio") : null;
+  const base = `#/empresa/${ent.id}/bancos`;
+  const [d, all] = await Promise.all([api(`/banks?entity=${ent.id}&scope=resumen&` + (year ? "year=" + year : "month=" + month)), api(`/banks?entity=${ent.id}&month=${month}`)]);
+  const label = year ? "del año" : "del mes";
+  const stat = (l, v, st) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, l), h("br"), h("b", { style: st || "" }, v));
+  const owedOf = (list) => list.reduce((s2, a) => s2 + Math.abs(Math.min(0, Number(a.balance) || 0)), 0);
+  const debit = d.accounts.filter((a) => a.card_type === "debito"), credit = d.accounts.filter((a) => a.card_type === "credito" || !a.card_type), loans = d.accounts.filter((a) => a.card_type === "prestamo");
+  const cash = debit.reduce((s2, a) => s2 + (effBal(a) || 0), 0), cardsOwed = owedOf(credit), loansOwed = owedOf(loans);
+  const T = d.total; const pa = Object.fromEntries(d.per_account.map((x) => [x.id, x]));
+  const contador = `#/empresa/${ent.id}/contador`;
+  const acctCard = (a) => { const t = pa[a.id] || { n: 0, in: 0, out: 0, missing: 0, personal: 0 };
+    return h("section", { class: "card stack", style: "gap:8px" },
+      h("span", { class: "stack", style: "gap:2px" }, h("span", { class: "row between", style: "gap:8px;flex-wrap:nowrap" }, h("b", null, a.nickname), a.sfin_id ? pill("Automática", "ok") : pill("Por extracto")), h("span", { class: "small muted" }, [bankOf(a.issuer), CTYPE[a.card_type], "•••• " + a.last4].join(" · "))),
+      h("div", { style: "padding:8px 10px;border-radius:10px;background:var(--line)" }, h("span", { class: "small muted" }, a.card_type === "debito" ? "Saldo disponible" : a.card_type === "prestamo" ? "Saldo del préstamo" : "Deuda actual", a.balance_at ? " · al " + fdate(a.balance_at) : ""), h("br"),
+        h("b", { class: "mono", style: "font-size:20px;" + (a.card_type !== "debito" && a.balance < 0 ? "color:var(--warn)" : "") }, a.balance == null ? (a.sfin_id ? "Sincroniza para traerlo" : "Sin conexión automática") : balanceText(a)),
+        ledgerNote(a) ? h("div", { class: "small muted" }, ledgerNote(a)) : ""),
+      h("span", { class: "small muted" }, year ? `Movimientos de ${year}:` : "Movimientos del mes:"),
+      h("div", { class: "row small", style: "gap:14px;flex-wrap:wrap" }, h("span", null, "Entró ", h("b", { class: "mono", style: "color:var(--ok)" }, usd(t.in))), h("span", null, "Salió ", h("b", { class: "mono" }, usd(t.out))), h("span", { class: "muted" }, `${t.n} movimiento${t.n === 1 ? "" : "s"}`)),
+      t.missing ? h("a", { class: "small", href: contador, style: "color:var(--warn);font-weight:700" }, `${t.missing} sin soporte → conciliar`) : t.n ? h("span", { class: "small", style: "color:var(--ok)" }, "Todo con soporte") : "",
+      t.personal ? h("span", { class: "small muted" }, `${t.personal} marcado(s) como personales (no cuentan)`) : ""); };
+  // Conexión automática: cuentas de SimpleFIN libres o asignadas a esta empresa
+  let conn = "";
+  if (!d.sfin.connected) conn = h("section", { class: "card row between" }, h("span", { class: "small" }, "Conecta SimpleFIN para que los saldos y movimientos de la empresa lleguen solos todos los días."), h("a", { class: "btn sm", href: "#/personal/conexion" }, "Conectar"));
+  else {
+    const r = await api("/personal/sfin/accounts").catch((e) => ({ error: e.message, accounts: [] }));
+    const mine = all.accounts; const myIds = new Set(mine.map((c) => c.id));
+    const list = (r.accounts || []).filter((a) => !a.card || myIds.has(a.card.id));
+    const visBox = (card) => h("label", { class: "row small", style: "gap:6px;white-space:nowrap;cursor:pointer", title: "Si la desmarcas, no aparece arriba ni en los totales. Sigue sincronizándose y conciliándose." },
+      h("input", { type: "checkbox", checked: !card.hide_summary, style: "width:auto", onchange: async (e) => { const on = e.target.checked; await api(`/personal/accounts/${card.id}/visible`, { method: "PUT", body: { show: on } }); toast(on ? "Se muestra en el resumen." : "Oculta en el resumen."); route(); } }), "Mostrar en resumen");
+    const rows = list.map((a) => { const card = a.card ? mine.find((c) => c.id === a.card.id) : null;
+      const sel = h("select", { "aria-label": "Asignar " + a.name, style: "width:auto;max-width:300px" }, h("option", { value: "" }, "Sin asignar (no se trae)"),
+        h("optgroup", { label: "Crear en " + ent.name }, h("option", { value: "new:debito" }, "Nueva cuenta bancaria"), h("option", { value: "new:credito" }, "Nueva tarjeta de crédito"), h("option", { value: "new:prestamo" }, "Nuevo préstamo")),
+        h("optgroup", { label: "Cuentas de " + ent.name }, mine.map((c) => h("option", { value: c.id, selected: card?.id === c.id }, `${c.nickname} •••• ${c.last4}`))));
+      sel.onchange = async () => { const v = sel.value; const body = { sfin_id: a.id };
+        if (v.startsWith("new:")) body.create = { entity_id: ent.id, card_type: v.slice(4), nickname: a.name.slice(0, 60), issuer: a.org, last4: (a.name.match(/(\d{4})\D*$/) || [])[1] || "0000" }; else body.card_id = v || null;
+        await api("/personal/sfin/map", { method: "POST", body }); toast(v ? "Asignada. Pulsa \"Sincronizar ahora\" para traer saldo y movimientos." : "Sin asignar."); route(); };
+      return h("div", { class: "row between", style: "padding:8px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" },
+        h("span", { class: "stack", style: "gap:2px" }, h("span", null, h("b", null, a.name), !a.card ? [" ", pill("Sin asignar")] : ""), h("span", { class: "small muted" }, `${a.org} · ` + (a.balance < 0 ? `debes ${usd(Math.abs(a.balance))}` : `disponible ${usd(a.available ? a.available : a.balance || 0)}`))),
+        h("span", { class: "row", style: "gap:14px;flex-wrap:wrap" }, card ? visBox(card) : "", sel)); });
+    const manual = mine.filter((c) => !c.sfin_id);
+    conn = h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Conexión automática"),
+        h("span", { class: "row", style: "gap:8px" }, h("a", { class: "btn sm", href: "#/personal/conexion" }, "↻ Actualizar cuentas"), h("button", { class: "btn primary sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => { const s2 = await api("/personal/sfin/sync", { method: "POST" }); toast(`Sincronizado: ${s2.added} movimiento(s) nuevos.`); route(); }) }, "Sincronizar ahora"))),
+      r.error ? h("p", { class: "small", style: "color:var(--bad);margin:0" }, r.error) : "",
+      rows.length ? h("div", null, rows) : h("p", { class: "small", style: "margin:0" }, "Ninguna cuenta de la empresa está en SimpleFIN todavía. Entra a SimpleFIN Bridge, agrega el banco de la empresa (por ejemplo Chase for Business o U.S. Bank Business) con su usuario de banca de empresas, y vuelve aquí: aparecerá en esta lista para asignarla."),
+      manual.length ? h("div", { class: "stack", style: "gap:4px" }, h("b", { class: "small" }, "Cuentas sin conexión automática (se alimentan con los extractos)"),
+        ...manual.map((c) => h("div", { class: "row between", style: "padding:6px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", null, h("b", null, c.nickname), h("span", { class: "small muted" }, ` · ${bankOf(c.issuer)} · ${CTYPE[c.card_type]} · •••• ${c.last4}`)), visBox(c)))) : "",
+      h("p", { class: "small muted", style: "margin:0" }, "Los movimientos que lleguen solos pasan directo a la conciliación de \"Para el contador\". Si un movimiento ya estaba leído de un extracto, se une a él y no se duplica."));
+  }
+  return h("div", { class: "stack", style: "gap:18px" },
+    h("div", { class: "row between" }, monthNav(base, month, year), h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog(ent) }, "Leer extracto")),
+    h("div", { class: "grid g4", style: loans.length ? "grid-template-columns:repeat(auto-fit,minmax(170px,1fr))" : "" }, stat("Disponible en cuentas", usd(cash)), stat("Debe en tarjetas", usd(cardsOwed), cardsOwed ? "color:var(--warn)" : ""), loans.length ? stat("Debe en préstamos", usd(loansOwed), loansOwed ? "color:var(--warn)" : "") : "",
+      stat("Posición neta (cuentas − deudas)", usd(cash - cardsOwed - loansOwed), cash - cardsOwed - loansOwed < 0 ? "color:var(--bad)" : ""), stat("Resultado " + label, usd(T.net), T.net < 0 ? "color:var(--bad)" : "color:var(--ok)")),
+    h("div", { class: "grid g4" }, stat("Entradas " + label, usd(T.in)), stat("Salidas " + label, usd(T.out)), stat("Movimientos " + label, String(T.n)),
+      h("a", { class: "card stat", href: contador, style: "text-decoration:none" }, h("span", { class: "small muted" }, "Sin soporte"), h("br"), h("b", { style: T.missing ? "color:var(--warn)" : "color:var(--ok)" }, T.missing ? `${T.missing} por conciliar →` : "Todo conciliado"))),
+    d.by_kind.length ? h("section", { class: "card stack" }, h("h2", null, "De dónde viene y a dónde va"),
+      h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["Tipo", "Entró", "Salió", "Movimientos"].map((c) => h("th", null, c)))),
+        h("tbody", null, d.by_kind.map((k) => h("tr", null, h("td", null, k.label === "Sin soporte todavía" ? h("a", { href: contador, style: "color:var(--warn);font-weight:700" }, k.label) : k.label), h("td", { class: "mono", style: "color:var(--ok)" }, k.in ? usd(k.in) : "—"), h("td", { class: "mono" }, k.out ? usd(k.out) : "—"), h("td", { class: "mono" }, String(k.n)))))))) : "",
+    h("h2", { style: "margin:0" }, "Por cuenta"),
+    d.accounts.length ? h("div", { class: "grid g3" }, d.accounts.map(acctCard)) : h("p", { class: "empty" }, "No hay cuentas para mostrar. Agrégalas en Tarjetas o asígnalas abajo."),
+    d.recent.length ? h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Últimos movimientos"), h("a", { href: contador, style: "font-weight:700" }, "Conciliación →")),
+      h("div", { class: "tablewrap" }, h("table", null, h("thead", null, h("tr", null, ["Fecha", "Descripción", "Monto", "Soporte"].map((c) => h("th", null, c)))),
+        h("tbody", null, d.recent.map((l) => { const c = d.accounts.find((x) => x.id === l.card_id);
+          return h("tr", null, h("td", { class: "mono" }, fdate(l.posted_on)), h("td", { class: "small" }, h("b", { style: "color:var(--ink)" }, l.description), l.pending ? [" ", pill("Pendiente", "warn")] : "", c ? h("div", { class: "muted" }, `${c.nickname} •••• ${c.last4}`) : ""),
+            h("td", { class: "mono", style: l.amount > 0 ? "color:var(--ok)" : "" }, (l.amount < 0 ? "−" : "+") + usd(Math.abs(l.amount))),
+            h("td", { class: "small" }, l.status === "sin_soporte" ? pill("Sin soporte", "warn") : l.status === "personal" ? pill("Personal") : l.match_label || pill("Con soporte", "ok"))); }))))) : "",
+    conn);
 }
 // ---------- suscripciones ----------
 const CYCLE = { mensual: "Mensual", anual: "Anual", gratis: "Gratis (sin cobro)" };
