@@ -101,21 +101,22 @@ const ROLE_LABEL = { admin: "Administrador", standard: "Usuario estándar", view
 const ROLE_HELP = { admin: "Puede hacer todo: editar, eliminar, dar accesos.", standard: "Ve todo, sube facturas y documentos, revisa lo que sube y envía a correos autorizados. No edita ni elimina.", viewer: "Solo ve y descarga. No sube ni cambia nada." };
 
 // ---------- login ----------
-function renderLogin(stepEmail) {
+function renderLogin(stepEmail, viaAdmin) {
   const box = h("div", { class: "box" });
   if (!stepEmail) {
     const email = h("input", { id: "login-email", type: "email", autocomplete: "email", required: true, placeholder: "tucorreo@starkumholdings.com" });
     const btn = h("button", { class: "btn primary", type: "submit" }, "Enviarme un código");
     box.append(h("div", { class: "mark" }, logo("auto", 44), h("span", null, "Starkum")), h("h1", null, "Entrar a la intranet"),
       h("p", { class: "muted", style: "margin:0" }, "Escribe tu correo de Starkum. Te enviaremos un código de un solo uso."),
-      h("form", { class: "stack", onsubmit: (e) => { e.preventDefault(); busy(btn, async () => { await api("/auth/request", { method: "POST", body: { email: email.value } }); renderLogin(email.value.trim().toLowerCase()); }); } },
+      h("form", { class: "stack", onsubmit: (e) => { e.preventDefault(); busy(btn, async () => { const r = await api("/auth/request", { method: "POST", body: { email: email.value } }); renderLogin(email.value.trim().toLowerCase(), !!r.via_admin); }); } },
         h("label", { class: "field", for: "login-email" }, "Correo", email), btn));
     setTimeout(() => email.focus(), 50);
   } else {
     const code = h("input", { id: "login-code", inputmode: "numeric", autocomplete: "one-time-code", maxlength: "6", pattern: "[0-9]{6}", required: true, placeholder: "000000", style: "font-family:var(--f-m);font-size:24px;letter-spacing:8px;text-align:center" });
     const btn = h("button", { class: "btn primary", type: "submit" }, "Entrar");
     box.append(h("div", { class: "mark" }, logo("auto", 44), h("span", null, "Starkum")), h("h1", null, "Revisa tu correo"),
-      h("p", { class: "muted", style: "margin:0" }, "Si ", h("b", null, stepEmail), " tiene acceso, le llegó un código de 6 dígitos. Vence en 10 minutos."),
+      viaAdmin ? h("p", { class: "muted", style: "margin:0" }, "A tu correo no se pudo enviar todavía, pero el administrador recibió tu código de 6 dígitos: pídeselo. Vence en 10 minutos.")
+        : h("p", { class: "muted", style: "margin:0" }, "Si ", h("b", null, stepEmail), " tiene acceso, le llegó un código de 6 dígitos. Vence en 10 minutos."),
       h("form", { class: "stack", onsubmit: (e) => { e.preventDefault(); busy(btn, async () => { await api("/auth/verify", { method: "POST", body: { email: stepEmail, code: code.value } }); await boot(); }); } },
         h("label", { class: "field", for: "login-code" }, "Código", code), btn,
         h("button", { class: "linkbtn", type: "button", onclick: () => renderLogin() }, "Usar otro correo o pedir otro código")));

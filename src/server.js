@@ -2436,23 +2436,31 @@ async function authRoutes(req, env, url) {
     const { email } = await req.json().catch(() => ({}));
     const e = normEmail(email);
     if (!validEmail(e)) return fail("Escribe un correo válido.");
-    const user = await env.DB.prepare("SELECT email FROM users WHERE email = ? AND active = 1").bind(e).first();
+    const user = await env.DB.prepare("SELECT email, name FROM users WHERE email = ? AND active = 1").bind(e).first();
     if (user) {
       const prev = await env.DB.prepare("SELECT sent_at FROM login_codes WHERE email = ?").bind(e).first();
       if (prev && Date.now() - prev.sent_at < 45_000) return json({ ok: true, wait: true });
       const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
       await env.DB.prepare("INSERT OR REPLACE INTO login_codes (email, code_hash, expires_at, attempts, sent_at) VALUES (?,?,?,0,?)").bind(e, await sha256(e + ":" + code), Date.now() + 10 * 60_000, Date.now()).run();
-      // Cloudflare solo entrega a correos verificados: si no lo está, se avisa claro en vez de "error interno"
+      // Se envía a la persona y, si no es el dueño, una copia al dueño: así puede pasarle el código si a su correo no le llega
+      const owner = ownerEmail(env); let sentUser = true, sentOwner = false, why = "";
       try { await sendMail(env, {
         to: e, subject: `Tu código de acceso: ${code}`,
         text: `Tu código para entrar a la intranet Starkum es ${code}.\n\nVence en 10 minutos. Si no lo pediste, ignora este correo.`,
         html: `<div style="font-family:Arial,sans-serif;font-size:15px;color:#14232b"><p>Tu código para entrar a la intranet Starkum es:</p><p style="font-size:30px;font-weight:bold;letter-spacing:6px">${code}</p><p style="color:#5b6b73">Vence en 10 minutos. Si no lo pediste, ignora este correo.</p></div>`,
         devNote: `código ${code}`,
-      }); } catch (err) {
-        await env.DB.prepare("DELETE FROM login_codes WHERE email = ?").bind(e).run();
-        console.log("login mail " + e + ": " + err.message);
-        return fail(/verified/i.test(err.message || "") ? "Todavía no se pueden enviar códigos a este correo: el administrador debe verificarlo primero. Avísale." : "No se pudo enviar el código. Inténtalo en unos minutos.", 503);
+      }); } catch (err) { sentUser = false; why = err.message || ""; console.log("login mail " + e + ": " + why); }
+      if (e !== owner) {
+        const who = (user.name || e).replace(/[<>&]/g, "");
+        try { await sendMail(env, {
+          to: owner, subject: `Código de acceso de ${who}: ${code}`,
+          text: `${who} (${e}) pidió entrar a la intranet Starkum.\n\nSu código es ${code} y vence en 10 minutos.${sentUser ? "" : "\n\nA su correo no se pudo enviar: pásaselo tú."}\n\nSi no fue esa persona, no lo compartas.`,
+          html: `<div style="font-family:Arial,sans-serif;font-size:15px;color:#14232b"><p><b>${who}</b> (${e}) pidió entrar a la intranet Starkum. Su código es:</p><p style="font-size:30px;font-weight:bold;letter-spacing:6px">${code}</p><p style="color:#5b6b73">Vence en 10 minutos.${sentUser ? "" : " A su correo no se pudo enviar: pásaselo tú."} Si no fue esa persona, no lo compartas.</p></div>`,
+          devNote: `copia código ${code}`,
+        }); sentOwner = true; } catch (err) { console.log("login mail copy: " + err.message); }
       }
+      if (!sentUser && !sentOwner) { await env.DB.prepare("DELETE FROM login_codes WHERE email = ?").bind(e).run(); return fail("No se pudo enviar el código. Inténtalo en unos minutos.", 503); }
+      if (!sentUser) return json({ ok: true, via_admin: true });
     }
     return json({ ok: true });
   }
