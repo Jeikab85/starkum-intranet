@@ -1669,7 +1669,8 @@ async function api(req, env, url, user) {
     let added = 0, dup = 0;
     if (lines.length) {
       const lo = lines.reduce((a, l) => (l.posted_on < a ? l.posted_on : a), "9999"), hi = lines.reduce((a, l) => (l.posted_on > a ? l.posted_on : a), "0000");
-      const pool = (await env.DB.prepare("SELECT posted_on, amount FROM bank_lines WHERE card_id = ? AND posted_on BETWEEN ? AND ?").bind(cardId, shiftDate(lo, -4), shiftDate(hi, 4)).all()).results.map((e) => ({ d: e.posted_on, a: Math.round(e.amount * 100), used: false }));
+      // Solo se compara con lo del banco conectado y con este mismo archivo: los estados de cuenta no se traslapan entre sí
+      const pool = (await env.DB.prepare("SELECT posted_on, amount FROM bank_lines WHERE card_id = ? AND posted_on BETWEEN ? AND ? AND (ext_id IS NOT NULL OR file_id = ?)").bind(cardId, shiftDate(lo, -4), shiftDate(hi, 4), fileId || "").all()).results.map((e) => ({ d: e.posted_on, a: Math.round(e.amount * 100), used: false }));
       const dd = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / 864e5;
       const ins = [];
       for (const l of lines) {
