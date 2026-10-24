@@ -1569,7 +1569,7 @@ async function api(req, env, url, user) {
     const month = /^\d{4}-\d{2}$/.test(url.searchParams.get("month") || "") ? url.searchParams.get("month") : now().slice(0, 7);
     const from = yr ? `${yr}-01-01` : month + "-01", to = yr ? `${yr}-12-31` : shiftDate(addMonthsClamp(month + "-01", 1, 1), -1);
     const scope = url.searchParams.get("scope");
-    let accts = (await env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND entity_id = ? AND COALESCE(owner, 'empresa') != 'personal' ORDER BY card_type DESC, nickname").bind(ent).all()).results;
+    let accts = (await env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id = ? OR entity_id IS NULL OR entity_id = '') AND COALESCE(owner, 'empresa') != 'personal' ORDER BY card_type DESC, nickname").bind(ent).all()).results;
     if (scope === "resumen") accts = accts.filter((a) => !a.hide_summary);
     const ids = new Set(accts.map((a) => a.id));
     const lines = (await env.DB.prepare("SELECT * FROM bank_lines WHERE entity_id = ? AND posted_on BETWEEN ? AND ? AND status != 'ignorado' ORDER BY posted_on DESC").bind(ent, from, to).all()).results.filter((l) => !l.card_id || ids.has(l.card_id) || scope !== "resumen");
