@@ -28,7 +28,13 @@ function h(tag, attrs, ...kids) {
   for (const c of kids.flat(Infinity)) if (c !== null && c !== undefined && c !== false) el.append(c.nodeType ? c : document.createTextNode(String(c)));
   return el;
 }
-const money = (v, cur = "USD") => v === null || v === undefined || v === "" ? "—" : Number(v).toLocaleString("es-US", { style: "currency", currency: cur || "USD", maximumFractionDigits: 2 });
+const money = (v, cur = "USD") => v === null || v === undefined || v === "" ? "—" : cur === "VES" ? (Number(v) < 0 ? "-" : "") + "Bs. " + Math.abs(Number(v)).toLocaleString("es-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : Number(v).toLocaleString("es-US", { style: "currency", currency: cur || "USD", maximumFractionDigits: 2 });
+// Perfiles de finanzas: "personal" (Mis finanzas) o "sp:<id>"
+const isFinEnt = (id) => id === "personal" || String(id || "").startsWith("sp:");
+const spaceOf = (id) => (id === "personal" ? "personal" : String(id || "").startsWith("sp:") ? id.slice(3) : null);
+const PB = () => (state.space && state.space !== "personal" ? "#/finanzas/" + state.space : "#/personal");
+const FENT = () => (state.space && state.space !== "personal" ? "sp:" + state.space : "personal");
+const SELF = () => state.self || "personal";
 const fdate = (d) => { if (!d) return "—"; const [y, m, dd] = d.slice(0, 10).split("-"); return `${Number(dd)} ${MON[Number(m) - 1]} ${y}`; };
 const bytes = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(0) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(2) + " GB";
 const ext = (f) => (f || "").split(".").pop().toUpperCase().slice(0, 4) || "ARCH";
@@ -45,7 +51,7 @@ function holdingsIcon(tone, size = 40) {
 }
 function entityLogo(e, size = 72) {
   const box = h("span", { class: "entlogo", style: `width:${size}px;height:${size}px`, "aria-hidden": "true" });
-  if (e.id === "personal") { box.innerHTML = `<svg viewBox="0 0 48 48" width="${Math.round(size * 0.62)}" height="${Math.round(size * 0.62)}"><defs><linearGradient id="pg${size}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9aa5ac"/><stop offset="1" stop-color="#3f6f57"/></linearGradient></defs><circle cx="24" cy="16" r="9" fill="url(#pg${size})"/><path d="M6 44c1.5-10 9-15 18-15s16.5 5 18 15" fill="url(#pg${size})"/></svg>`; return box; }
+  if (isFinEnt(e.id)) { box.innerHTML = `<svg viewBox="0 0 48 48" width="${Math.round(size * 0.62)}" height="${Math.round(size * 0.62)}"><defs><linearGradient id="pg${size}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9aa5ac"/><stop offset="1" stop-color="#3f6f57"/></linearGradient></defs><circle cx="24" cy="16" r="9" fill="url(#pg${size})"/><path d="M6 44c1.5-10 9-15 18-15s16.5 5 18 15" fill="url(#pg${size})"/></svg>`; return box; }
   const fallback = () => box.replaceChildren(holdingsIcon("", Math.round(size * 0.78)));
   const img = h("img", { src: `/api/entities/${e.id}/logo?v=${state.logoV || 0}`, alt: "", onerror: fallback });
   box.append(img);
@@ -68,6 +74,8 @@ async function api(path, opts = {}) {
   const o = { method: opts.method || "GET", headers: {}, credentials: "same-origin" };
   if (opts.body instanceof FormData) o.body = opts.body;
   else if (opts.body !== undefined) { o.body = JSON.stringify(opts.body); o.headers["content-type"] = "application/json"; }
+  // Dentro de un perfil de finanzas, las rutas /personal/... van con su perfil
+  if (path.startsWith("/personal/") && state.space && state.space !== "personal" && !/[?&]space=/.test(path)) path += (path.includes("?") ? "&" : "?") + "space=" + encodeURIComponent(state.space);
   const res = await fetch("/api" + path, o);
   const v = res.headers.get("x-app-version");
   if (v && v !== APP_VERSION) state.stale = true;
@@ -81,7 +89,7 @@ async function busy(btn, fn) {
   try { return await fn(); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; btn.textContent = label; }
 }
 const state = { user: null, businesses: [], entities: [], stale: false, entity: null };
-function setEntity(id) { state.entity = id || null; try { id ? localStorage.setItem("empresa", id) : localStorage.removeItem("empresa"); } catch { /* sin almacenamiento */ } }
+function setEntity(id) { if (!isFinEnt(id)) state.space = null; state.entity = id || null; try { id ? localStorage.setItem("empresa", id) : localStorage.removeItem("empresa"); } catch { /* sin almacenamiento */ } }
 const APP_VERSION = "__APP_VERSION__";
 const ROLE_LABEL = { admin: "Administrador", standard: "Usuario estándar", viewer: "Solo consulta" };
 const ROLE_HELP = { admin: "Puede hacer todo: editar, eliminar, dar accesos.", standard: "Ve todo, sube facturas y documentos, revisa lo que sube y envía a correos autorizados. No edita ni elimina.", viewer: "Solo ve y descarga. No sube ni cambia nada." };
@@ -116,10 +124,10 @@ function shell(content, active) {
   const a = (href, key, label, cls = "") => h("a", { href, class: (active === key ? "on " : "") + cls }, label);
   const nav = h("nav", { class: "side", id: "side", "aria-label": "Menú principal" },
     h("a", { class: "brand", href: "#/" }, logo("light", 30), h("span", { class: "brandtext" }, h("b", null, "Starkum"), h("span", null, "Intranet"))),
-    ent && ent.id === "personal" ? [
-      h("div", { class: "navgroup" }, h("span", { class: "label" }, "Personal"),
-        h("a", { href: "#/", class: "entswitch", title: "Volver a elegir" }, h("b", null, "Mis finanzas"), h("span", null, "Cambiar de espacio")),
-        PTABS.map(([k, l]) => a(`#/personal/${k}`, `personal-${k}`, l)))
+    ent && isFinEnt(ent.id) ? [
+      h("div", { class: "navgroup" }, h("span", { class: "label" }, "Finanzas"),
+        h("a", { href: "#/", class: "entswitch", title: "Volver a elegir" }, h("b", null, ent.id === "personal" ? "Mis finanzas" : ent.name), h("span", null, state.entities.length > 1 ? "Cambiar de espacio" : "Tu espacio")),
+        PTABS.map(([k, l]) => a(`${PB()}/${k}`, `personal-${k}`, l)))
     ] : ent ? [
       h("div", { class: "navgroup" }, h("span", { class: "label" }, "Empresa"),
         h("a", { href: "#/", class: "entswitch", title: "Volver a elegir empresa" }, h("b", null, ent.name), h("span", null, "Cambiar de empresa")),
@@ -136,8 +144,8 @@ function shell(content, active) {
     ] : [
       h("div", { class: "navgroup" }, a("#/", "inicio", "Elegir empresa"))
     ],
-    h("div", { class: "navgroup" }, a("#/ajustes", "ajustes", "Accesos y ajustes")),
-    h("div", { class: "who" }, h("b", null, state.user.name || "Mi cuenta"), h("span", null, state.user.email), h("span", null, ROLE_LABEL[state.user.role] || ""),
+    state.spaceOnly ? "" : h("div", { class: "navgroup" }, a("#/ajustes", "ajustes", "Accesos y ajustes")),
+    h("div", { class: "who" }, h("b", null, state.user.name || "Mi cuenta"), h("span", null, state.user.email), h("span", null, state.spaceOnly ? "Administra su espacio" : ROLE_LABEL[state.user.role] || ""),
       h("button", { type: "button", onclick: async () => { await api("/auth/logout", { method: "POST" }); state.user = null; renderLogin(); } }, "Cerrar sesión")));
   nav.addEventListener("click", (e) => { if (e.target.tagName === "A") nav.classList.remove("open"); });
   const top = h("div", { class: "topbar" }, h("span", { class: "row", style: "gap:8px" }, logo("light", 22), h("b", null, "Starkum")), h("button", { type: "button", "aria-controls": "side", onclick: () => nav.classList.toggle("open") }, "Menú"));
@@ -237,7 +245,7 @@ async function sendDialog({ invoice_ids = [], doc_ids = [] }) {
   modal(n === 1 ? "Enviar a mi correo" : `Enviar ${n} archivos`, () => h("div", { class: "stack" },
     fld("Enviar a", h("select", { name: "to" }, recipients.map((r) => h("option", { value: r.email }, (r.label ? r.label + " · " : "") + r.email)))),
     fld("Asunto (opcional)", h("input", { name: "subject", placeholder: "Por ejemplo: facturas para caso de Amazon" })),
-    invoice_ids.length ? h("label", { class: "row", style: "gap:8px;align-items:flex-start" }, h("input", { type: "checkbox", name: "with_payment", checked: true, style: "width:auto;margin-top:3px" }),
+    invoice_ids.length ? h("label", { class: "row", style: "gap:10px;align-items:flex-start;flex-wrap:nowrap;cursor:pointer" }, h("input", { type: "checkbox", name: "with_payment", checked: true, style: "width:auto;margin-top:3px" }),
       h("span", { class: "small" }, h("b", null, "Incluir el soporte de pago"), h("br"), "Agrega en el correo con qué tarjeta se pagó (red, banco, últimos 4 y titular) y adjunta el estado de cuenta de ese mes si lo subiste.")) : "",
     h("p", { class: "small muted", style: "margin:0" }, "Llegan como adjuntos. Cada correo lleva hasta 3,5 MB; si pesan más juntos, se dividen en varios correos.")),
   async (fd) => {
@@ -294,16 +302,18 @@ async function pageHome() {
   shell(loading(), "inicio");
   const { entities } = await api("/entities");
   state.entities = entities.map((e) => ({ ...e, ...(state.entities.find((x) => x.id === e.id) || {}), details: e.details }));
+  // Quien solo tiene un espacio entra directo a él
+  if (entities.length === 1 && isFinEnt(entities[0].id)) { location.replace(entities[0].id === "personal" ? "#/personal" : "#/finanzas/" + spaceOf(entities[0].id)); return; }
   const page = h("div", { class: "page chooser" },
-    h("div", { class: "chooserhead" }, logo("auto", 72), h("h1", null, "¿En qué empresa vas a trabajar?")),
-    h("div", { class: "entpick" + (entities.length > 2 ? " three" : "") }, entities.map((e) => h("div", { class: "entwrap" }, h("a", { class: "entcard", href: e.id === "personal" ? "#/personal" : "#/empresa/" + e.id },
+    h("div", { class: "chooserhead" }, logo("auto", 72), h("h1", null, state.spaceOnly ? "¿Qué espacio quieres abrir?" : "¿En qué empresa vas a trabajar?")),
+    h("div", { class: "entpick" + (entities.length > 2 ? " three" : "") }, entities.map((e) => h("div", { class: "entwrap" }, h("a", { class: "entcard", href: e.id === "personal" ? "#/personal" : e.kind === "space" ? "#/finanzas/" + spaceOf(e.id) : "#/empresa/" + e.id },
       entityLogo(e, 96), h("span", { class: "stack", style: "gap:4px;align-items:center;text-align:center" }, h("b", { style: "font-size:22px" }, e.name), h("span", { class: "muted" }, e.country))),
       entityWeb(e)))));
   shell(page, "inicio");
 }
 async function companyHome(ent) {
   const d = await api("/dashboard?entity=" + ent.id);
-  state.businesses = d.all_businesses; state.entities = [...d.entities, ...state.entities.filter((e) => e.id === "personal")];
+  state.businesses = d.all_businesses; state.entities = [...d.entities, ...state.entities.filter((e) => isFinEnt(e.id) && !d.entities.some((x) => x.id === e.id))];
   const hour = Number(new Date().toLocaleString("en-US", { hour: "numeric", hour12: false, timeZone: "America/Chicago" }));
   const hello = hour < 12 ? "Buenos días" : hour < 19 ? "Buenas tardes" : "Buenas noches";
   const today = new Date().toLocaleDateString("es-US", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "America/Chicago" });
@@ -851,12 +861,12 @@ async function cardsView(entityId) {
       kv("Es de", c.owner === "empresa" ? "La empresa" : "Uso personal"), c.notes ? kv("Notas", c.notes) : "",
       c.balance != null ? kv(c.card_type === "debito" ? "Saldo" : c.card_type === "prestamo" ? "Saldo del préstamo" : "Saldo de la tarjeta", (c.card_type !== "debito" && c.balance < 0 ? "Debes " : "") + money(Math.abs(c.balance), c.currency || "USD") + (c.balance_at ? ` · ${fdate(c.balance_at)}` : "")) : "",
       c.sfin_id ? kv("Conexión", "Automática (SimpleFIN)") : "",
-      entityId === "personal" ? h("div", null, h("span", null, "¿De quién es el dinero?"), h("select", { style: "width:auto;margin-top:4px", "aria-label": "Dueño del dinero de esta cuenta", onchange: async (e) => { const v = e.target.value; await api(`/personal/accounts/${c.id}/owner`, { method: "PUT", body: { owner: v } }); toast(v === "personal" ? "Marcada como tuya." : `Marcada como dinero de ${ownerName(v, state.people)}: sus movimientos son de esa persona salvo que cambies alguno.`); route(); } },
-        ownerList(state.people).filter(([k]) => k !== "starkum").map(([k, l]) => h("option", { value: k, selected: k === (c.money_owner || (c.others_money ? "" : "personal")) }, l)), !c.money_owner && c.others_money ? h("option", { value: "", selected: true, disabled: true }, "Otra persona (elige quién)") : "")) : "");
+      isFinEnt(entityId) ? h("div", null, h("span", null, "¿De quién es el dinero?"), h("select", { style: "width:auto;margin-top:4px", "aria-label": "Dueño del dinero de esta cuenta", onchange: async (e) => { const v = e.target.value; await api(`/personal/accounts/${c.id}/owner`, { method: "PUT", body: { owner: v } }); toast(v === "personal" ? "Marcada como tuya." : `Marcada como dinero de ${ownerName(v, state.people)}: sus movimientos son de esa persona salvo que cambies alguno.`); route(); } },
+        ownerList(state.people).filter(([k]) => k !== "starkum").map(([k, l]) => h("option", { value: k, selected: k === effOwner(c) }, l)), !effOwner(c) ? h("option", { value: "", selected: true, disabled: true }, "Otra persona (elige quién)") : "")) : "");
   };
   const entName = (id) => (state.entities.find((e) => e.id === id) || {}).name;
   return h("div", { class: "stack", style: "gap:14px" },
-    entityId === "personal" && cards.length ? balancesTable(cards) : "",
+    isFinEnt(entityId) && cards.length ? balancesTable(cards) : "",
     h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, "Cada factura se asocia a la tarjeta con que pagaste. Se guardan solo el banco, la red, el tipo, el titular, los últimos 4 dígitos y el vencimiento: nunca el número completo, el código de seguridad ni la foto."),
       h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => cardDialog(null, entityId) }, "+ Agregar tarjeta")),
     cards.length ? h("div", { class: "stack", style: "gap:22px" }, byBank(cards).map(([bank, list]) => h("div", { class: "stack", style: "gap:12px" },
@@ -865,10 +875,10 @@ async function cardsView(entityId) {
       h("div", { class: "row between", style: "align-items:flex-start" },
         h("div", { class: "row", style: "gap:14px;align-items:center" }, h("div", { class: "cardchip" + (c.card_type === "debito" ? " debit" : ""), "aria-hidden": "true" }, h("span", null, (c.network || "Tarjeta") + " · " + (CTYPE[c.card_type] || "Crédito")), h("b", { class: "mono" }, "•••• " + c.last4)),
           h("div", { class: "stack", style: "gap:2px" }, h("b", { style: "font-size:17px" }, c.nickname),
-            entityId === "personal" ? balanceLine(c) : h("span", { class: "small" }, `${c.uses.n} factura${c.uses.n === 1 ? "" : "s"} pagada${c.uses.n === 1 ? "" : "s"} con ella · ${money(c.uses.total)}`),
+            isFinEnt(entityId) ? balanceLine(c) : h("span", { class: "small" }, `${c.uses.n} factura${c.uses.n === 1 ? "" : "s"} pagada${c.uses.n === 1 ? "" : "s"} con ella · ${money(c.uses.total)}`),
             !c.entity_id ? h("span", { class: "small muted" }, "Se usa en todas las empresas") : "")),
-        h("div", { class: "row only-admin" }, entityId === "personal" && !c.sfin_id ? h("button", { class: "btn sm", type: "button", onclick: () => balanceDialog(c) }, "Actualizar saldo") : "", h("button", { class: "btn sm", type: "button", onclick: () => cardDialog(c, entityId) }, "Editar"),
-          h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Eliminar tarjeta", `Se borra ${c.nickname} •••• ${c.last4} y sus estados de cuenta. Las facturas no se borran: quedan sin tarjeta asociada.`, async () => { await api("/cards/" + c.id, { method: "DELETE" }); toast("Tarjeta eliminada."); route(); }) }, "Eliminar"))),
+        h("div", { class: "row only-admin" }, isFinEnt(entityId) && !c.sfin_id ? h("button", { class: "btn sm", type: "button", onclick: () => balanceDialog(c) }, "Actualizar saldo") : "", h("button", { class: "btn sm", type: "button", onclick: () => cardDialog(c, entityId) }, "Editar"),
+          c.shared ? "" : h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Eliminar tarjeta", `Se borra ${c.nickname} •••• ${c.last4} y sus estados de cuenta. Las facturas no se borran: quedan sin tarjeta asociada.`, async () => { await api("/cards/" + c.id, { method: "DELETE" }); toast("Tarjeta eliminada."); route(); }) }, "Eliminar"))),
       info(c), cyclesView(c)))))) : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay tarjetas de esta empresa. Agrega cada tarjeta con la que compras.")));
 }
 function cardDialog(c, entityId) {
@@ -900,8 +910,11 @@ function cardDialog(c, entityId) {
       h("div", { class: "fgrid" }, fld("Tipo", typeSel), inp("nickname", "Nombre corto", { required: true, placeholder: "Por ejemplo: Chase personal" }), inp("issuer", "Banco o emisor"), fld("Red", netSel)),
       h("div", { class: "fgrid" }, inp("holder", "Titular"), inp("last4", "Últimos 4 dígitos", { required: true, inputmode: "numeric", maxlength: "4", pattern: "\\d{4}" }), inp("exp_month", "Mes de vencimiento", { type: "number", min: "1", max: "12" }), inp("exp_year", "Año de vencimiento", { type: "number", min: "2024", max: "2099" })),
       creditBox, debitBox,
-      h("div", { class: "fgrid" }, fld("Empresa donde se usa", h("select", { name: "entity_id" }, state.entities.map((e) => h("option", { value: e.id, selected: (c ? c.entity_id : entityId) === e.id }, e.name)), h("option", { value: "", selected: c && !c.entity_id }, "Todas las empresas"))),
-        fld("Es de", h("select", { name: "owner" }, [["personal", "Uso personal"], ["empresa", "La empresa"]].map(([k, l]) => h("option", { value: k, selected: (c?.owner || "personal") === k }, l)))), inp("notes", "Notas")));
+      String(entityId || "").startsWith("sp:")
+        ? h("div", { class: "fgrid" }, h("input", { type: "hidden", name: "entity_id", value: c?.entity_id || entityId }), h("input", { type: "hidden", name: "owner", value: c?.owner || "personal" }), inp("notes", "Notas"))
+        : h("div", { class: "fgrid" }, fld("Empresa donde se usa", h("select", { name: "entity_id" }, state.entities.filter((e) => !String(e.id).startsWith("sp:")).map((e) => h("option", { value: e.id, selected: (c ? c.entity_id : entityId) === e.id }, e.name)), h("option", { value: "", selected: c && !c.entity_id }, "Todas las empresas"))),
+        fld("Es de", h("select", { name: "owner" }, [["personal", "Uso personal"], ["empresa", "La empresa"]].map(([k, l]) => h("option", { value: k, selected: (c?.owner || "personal") === k }, l)))), inp("notes", "Notas")),
+      isFinEnt(entityId) ? h("div", { class: "fgrid" }, fld("Moneda de la cuenta", h("select", { name: "currency" }, [["USD", "Dólares (USD)"], ["VES", "Bolívares (Bs.) · cuenta en Venezuela"], ["COP", "Pesos colombianos (COP)"]].map(([k, l]) => h("option", { value: k, selected: (c?.currency || "USD") === k }, l))))) : "");
   }, async (fd) => {
     const body = Object.fromEntries(fd);
     if (/\d{5,}/.test(body.last4 || "")) throw new Error("Escribe solo los últimos 4 dígitos.");
@@ -1235,18 +1248,25 @@ function monthNav(base, month, year) {
   if (year) return h("div", { class: "row", style: "gap:8px" }, h("a", { class: "btn sm", href: base + "?anio=" + (Number(year) - 1) }, "‹"), h("b", { style: "min-width:150px;text-align:center" }, "Todo " + year), h("a", { class: "btn sm", href: base + "?anio=" + (Number(year) + 1) }, "›"), toggle);
   return h("div", { class: "row", style: "gap:8px" }, h("a", { class: "btn sm", href: base + "?mes=" + shift(-1) }, "‹"), h("b", { style: "min-width:150px;text-align:center" }, MONTHS[m - 1] + " " + y), h("a", { class: "btn sm", href: base + "?mes=" + shift(1) }, "›"), toggle);
 }
-async function pagePersonal(tab, q) {
+async function pagePersonal(tab, q, sid = "personal") {
   tab = PTABS.some((t) => t[0] === tab) ? tab : "resumen";
-  setEntity("personal");
+  const entId = sid === "personal" ? "personal" : "sp:" + sid;
+  if (!state.entities.some((e) => e.id === entId)) return pageNotFound();
+  state.space = sid;
+  setEntity(entId);
   const act = "personal-" + tab;
   shell(loading(), act);
-  const ent = state.entities.find((e) => e.id === "personal") || { id: "personal", name: "Personal", details: {} };
-  const head = [h("div", { class: "head" }, h("div", { class: "row", style: "gap:14px;align-items:center;flex-wrap:nowrap" }, entityLogo(ent, 56), h("div", null, h("span", { class: "eyebrow" }, "Personal · solo tú lo ves"), h("h1", null, "Mis finanzas")))),
-    h("div", { class: "tabs", role: "tablist" }, PTABS.map(([k, l]) => h("a", { href: `#/personal/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
+  const ent = state.entities.find((e) => e.id === entId) || { id: entId, name: "Personal", details: {} };
+  const pp = await api("/personal/people").catch(() => ({ people: [], self: "personal" }));
+  state.people = pp.people; state.self = pp.self || "personal";
+  const title = sid === "personal" ? "Mis finanzas" : ent.name;
+  const eyebrow = sid === "personal" ? "Personal · solo tú lo ves" : state.spaceOnly ? "Tu espacio de finanzas" : "Perfil de finanzas · lo ven tú y quien autorices";
+  const head = [h("div", { class: "head" }, h("div", { class: "row", style: "gap:14px;align-items:center;flex-wrap:nowrap" }, entityLogo(ent, 56), h("div", null, h("span", { class: "eyebrow" }, eyebrow), h("h1", null, title)))),
+    h("div", { class: "tabs", role: "tablist" }, PTABS.map(([k, l]) => h("a", { href: `${PB()}/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
   const month = /^\d{4}-\d{2}$/.test(q.get("mes") || "") ? q.get("mes") : new Date().toISOString().slice(0, 7);
   const year = /^\d{4}$/.test(q.get("anio") || "") ? q.get("anio") : null;
   let content;
-  if (tab === "cuentas") { state.people = (await api("/personal/people").catch(() => ({ people: [] }))).people; content = await cardsView("personal"); }
+  if (tab === "cuentas") { state.fxRate = (await api("/fx/ves").catch(() => ({}))).fx?.rate || 0; content = await cardsView(entId); }
   else if (tab === "suscripciones") content = await subsView(ent, null, q);
   else if (tab === "conexion") content = await sfinView();
   else {
@@ -1263,44 +1283,48 @@ function catBars(list, usd) {
 }
 function personalSummary(d, month, year) {
   const usd = (v) => money(v, "USD");
-  const mineAccts = d.accounts.filter((a) => (a.money_owner || "personal") === "personal");
+  const self = d.space?.person || "personal";
+  const fxr = d.fx?.rate || 0; const inUsd = (a) => { const b = effBal(a); return b == null ? 0 : a.currency === "VES" ? (fxr ? b / fxr : 0) : b; };
+  const mineAccts = d.accounts.filter((a) => (a.money_owner || self) === self);
   const debit = mineAccts.filter((a) => a.card_type === "debito"), credit = mineAccts.filter((a) => a.card_type === "credito" || !a.card_type), loans = mineAccts.filter((a) => a.card_type === "prestamo");
-  const owedOf = (list) => list.reduce((s, a) => s + Math.abs(Math.min(0, Number(a.balance) || 0)), 0);
-  const cash = debit.reduce((s, a) => s + (effBal(a) || 0), 0), cardsOwed = owedOf(credit), loansOwed = owedOf(loans), owed = cardsOwed + loansOwed;
-  const othersCash = d.accounts.filter((a) => (a.money_owner || "personal") !== "personal").reduce((s, a) => s + (effBal(a) || 0), 0);
+  const owedOf = (list) => list.reduce((s, a) => s + Math.abs(Math.min(0, a.currency === "VES" ? (fxr ? (Number(a.balance) || 0) / fxr : 0) : Number(a.balance) || 0)), 0);
+  const cash = debit.reduce((s, a) => s + inUsd(a), 0), cardsOwed = owedOf(credit), loansOwed = owedOf(loans), owed = cardsOwed + loansOwed;
+  const othersCash = d.accounts.filter((a) => (a.money_owner || self) !== self).reduce((s, a) => s + inUsd(a), 0);
   const stat = (l, v, cls) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, l), h("br"), h("b", { style: cls || "" }, v));
   const label = year ? "del año" : "del mes";
-  const base = "#/personal/resumen";
+  const base = PB() + "/resumen";
   const acctCard = (a) => h("section", { class: "card stack", style: "gap:8px" + (a.others_money ? ";border-style:dashed" : "") },
-    h("span", { class: "stack", style: "gap:2px" }, h("span", { class: "row between", style: "gap:8px;flex-wrap:nowrap" }, h("b", null, a.nickname), a.money_owner && a.money_owner !== "personal" ? pill("Dinero de " + ownerName(a.money_owner, d.people), "info") : ""), h("span", { class: "small muted" }, [bankOf(a.issuer), CTYPE[a.card_type], "•••• " + a.last4].join(" · "))),
+    h("span", { class: "stack", style: "gap:2px" }, h("span", { class: "row between", style: "gap:8px;flex-wrap:nowrap" }, h("b", null, a.nickname), h("span", { class: "chips" }, a.shared ? pill("Compartida", "ok") : "", a.money_owner && a.money_owner !== self ? pill("Dinero de " + ownerName(a.money_owner, d.people), "info") : "")), h("span", { class: "small muted" }, [bankOf(a.issuer), CTYPE[a.card_type], "•••• " + a.last4].join(" · "))),
     h("div", { style: "padding:8px 10px;border-radius:10px;background:var(--line)" }, h("span", { class: "small muted" }, a.card_type === "debito" ? "Saldo disponible" : "Deuda actual", a.balance_at ? " · al " + fdate(a.balance_at) : ""), h("br"),
       h("b", { class: "mono", style: "font-size:20px;" + (a.card_type !== "debito" && a.balance < 0 ? "color:var(--warn)" : "") }, balanceText(a)),
+      a.currency === "VES" && effBal(a) != null ? h("div", { class: "small", style: "font-weight:700" }, fxr ? `≈ ${usd(Math.abs(inUsd(a)))} · tasa BCV ${fxr.toLocaleString("es-US", { maximumFractionDigits: 2 })} Bs./$` : "Sin tasa BCV disponible ahora") : "",
       ledgerNote(a) ? h("div", { class: "small muted" }, ledgerNote(a)) : ""),
     h("span", { class: "small muted" }, year ? `Movimientos de ${year}:` : "Movimientos del mes:"),
-    h("div", { class: "row small", style: "gap:14px;flex-wrap:wrap" }, h("span", null, "Entró ", h("b", { class: "mono", style: "color:var(--ok)" }, usd(a.in_total))), h("span", null, "Salió ", h("b", { class: "mono" }, usd(a.out_total))), h("span", { class: "muted" }, `${a.n} movimiento${a.n === 1 ? "" : "s"}`)),
+    h("div", { class: "row small", style: "gap:14px;flex-wrap:wrap" }, h("span", null, "Entró ", h("b", { class: "mono", style: "color:var(--ok)" }, money(a.in_total, a.currency))), h("span", null, "Salió ", h("b", { class: "mono" }, money(a.out_total, a.currency))), h("span", { class: "muted" }, `${a.n} movimiento${a.n === 1 ? "" : "s"}`)),
     a.by_category.length ? h("span", { class: "small muted" }, "En qué: " + a.by_category.slice(0, 3).map((c) => `${c.category} ${usd(c.total)}`).join(" · ")) : "",
-    (a.owners || []).length > 1 || ((a.owners || [])[0] && a.owners[0].owner !== (a.money_owner || "personal")) ? h("div", { class: "stack", style: "gap:4px;padding:8px 10px;border-radius:10px;border:1px solid var(--line)" },
+    (a.owners || []).length > 1 || ((a.owners || [])[0] && a.owners[0].owner !== (a.money_owner || self)) ? h("div", { class: "stack", style: "gap:4px;padding:8px 10px;border-radius:10px;border:1px solid var(--line)" },
       h("b", { class: "small" }, "Movimientos por persona"),
-      ...a.owners.map((o) => { const own = o.owner === (a.money_owner || "personal"); const who = o.owner === "personal" ? "Tú" : ownerName(o.owner, d.people);
-        const accWho = (a.money_owner || "personal") === "personal" ? "ti" : ownerName(a.money_owner, d.people);
+      ...a.owners.map((o) => { const own = o.owner === (a.money_owner || self); const who = o.owner === self ? "Tú" : ownerName(o.owner, d.people);
+        const accWho = (a.money_owner || self) === self ? "ti" : ownerName(a.money_owner, d.people);
         const note = own ? "dueño de la cuenta" : o.net > 0 ? `a favor de ${who === "Tú" ? "ti" : who}: ${usd(o.net)}` : o.net < 0 ? `${who === "Tú" ? "le debes" : "debe"} ${usd(-o.net)} a ${accWho === "ti" ? "ti" : accWho}` : "en cero";
         return h("div", { class: "row between small", style: "gap:6px;flex-wrap:wrap" }, h("span", null, h("b", null, who), h("span", { class: "muted" }, ` · ${o.n} mov. · entró ${usd(o.in)} · salió ${usd(o.out)}`)),
           h("span", { style: own || !o.net ? "color:var(--muted)" : (o.net < 0 ? who === "Tú" : accWho === "ti") ? "color:var(--warn);font-weight:700" : (o.net < 0 ? accWho === "ti" : who === "Tú") ? "color:var(--ok);font-weight:700" : "font-weight:700" }, note)); })) : "",
-    h("a", { class: "small", href: `#/personal/movimientos?${year ? "anio=" + year : "mes=" + month}&cuenta=${a.id}`, style: "font-weight:700" }, "Ver movimientos →"));
+    h("a", { class: "small", href: `${PB()}/movimientos?${year ? "anio=" + year : "mes=" + month}&cuenta=${a.id}`, style: "font-weight:700" }, "Ver movimientos →"));
   return h("div", { class: "stack", style: "gap:18px" },
     h("div", { class: "row between" }, monthNav(base, month, year), h("div", { class: "row only-admin", style: "gap:8px" },
-      h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog({ id: "personal", name: "Personal" }) }, "Leer extracto"),
+      h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog({ id: FENT(), name: d.space?.name || "Personal" }) }, "Leer extracto"),
       h("button", { class: "btn primary sm", type: "button", onclick: () => personalMoveDialog(d.categories) }, "+ Movimiento manual"))),
-    !d.sfin.connected ? h("section", { class: "card row between" }, h("span", { class: "small" }, "Conecta tus bancos para que los movimientos y saldos lleguen solos todos los días."), h("a", { class: "btn sm", href: "#/personal/conexion" }, "Conectar bancos")) : "",
+    !d.sfin.connected && !d.accounts.length ? h("section", { class: "card row between" }, h("span", { class: "small" }, "Conecta tus bancos para que los movimientos y saldos lleguen solos todos los días."), h("a", { class: "btn sm", href: PB() + "/conexion" }, "Conectar bancos")) : "",
+    d.fx ? h("p", { class: "small muted", style: "margin:0" }, `Las cuentas en bolívares se suman en dólares con la tasa oficial del BCV: ${d.fx.rate.toLocaleString("es-US", { maximumFractionDigits: 2 })} Bs. por dólar (${fdate(d.fx.date)}).`) : "",
     h("h2", { style: "margin:0" }, "Lo tuyo", h("span", { class: "small muted", style: "font-weight:400" }, " · solo los movimientos marcados como tuyos")),
     h("div", { class: "grid g4", style: loans.length ? "grid-template-columns:repeat(auto-fit,minmax(170px,1fr))" : "" }, stat(loans.length ? "Patrimonio (cuentas − tarjetas − préstamos)" : "Patrimonio (cuentas − tarjetas)", usd(cash - owed), cash - owed < 0 ? "color:var(--bad)" : ""), stat("Disponible en tus cuentas", usd(cash)), stat("Debes en tarjetas", usd(cardsOwed), cardsOwed ? "color:var(--warn)" : ""), loans.length ? stat("Debes en préstamos", usd(loansOwed), loansOwed ? "color:var(--warn)" : "") : "", stat("Ahorro " + label, usd(d.income - d.spend), d.income - d.spend < 0 ? "color:var(--bad)" : "color:var(--ok)")),
     h("div", { class: "grid g4" }, stat("Ingresos " + label, usd(d.income)), stat("Gastos " + label, usd(d.spend)), stat("Suscripciones " + label, usd(d.sub_charges.reduce((s, x) => s + (x.currency === "USD" ? x.amount : 0), 0))), stat("Promedio de gasto al mes", usd(year ? d.spend / Math.max(1, Number(year) === new Date().getFullYear() ? new Date().getMonth() + 1 : 12) : d.spend))),
     (d.between || []).length ? h("section", { class: "card stack", style: "gap:8px" }, h("h2", null, "Cuentas entre personas"),
       h("p", { class: "small muted", style: "margin:0" }, "Sale de los movimientos que marcaste con otra persona en una cuenta que no es suya. Es el acumulado de todo el historial, no solo de este período."),
-      ...d.between.map((x) => { const dn = x.debtor === "personal" ? "Tú" : ownerName(x.debtor, d.people), cn = x.creditor === "personal" ? "ti" : ownerName(x.creditor, d.people);
+      ...d.between.map((x) => { const dn = x.debtor === self ? "Tú" : ownerName(x.debtor, d.people), cn = x.creditor === self ? "ti" : ownerName(x.creditor, d.people);
         return h("div", { class: "row between", style: "gap:8px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--line)" },
-          h("span", null, h("b", null, dn), x.debtor === "personal" ? ` le debes a ${cn}` : ` le debe a ${cn}`, h("span", { class: "small muted" }, ` · ${x.n} movimiento${x.n === 1 ? "" : "s"}`)),
-          h("b", { class: "mono", style: x.debtor === "personal" ? "color:var(--warn)" : "color:var(--ok)" }, usd(x.amount))); })) : "",
+          h("span", null, h("b", null, dn), x.debtor === self ? ` le debes a ${cn}` : ` le debe a ${cn}`, h("span", { class: "small muted" }, ` · ${x.n} movimiento${x.n === 1 ? "" : "s"}`)),
+          h("b", { class: "mono", style: x.debtor === self ? "color:var(--warn)" : x.creditor === self ? "color:var(--ok)" : "" }, usd(x.amount))); })) : "",
     h("div", { class: "split" },
       h("section", { class: "card stack", style: "flex:1 1 360px" }, h("h2", null, "En qué se fue tu dinero"), catBars(d.by_category, usd)),
       h("section", { class: "card stack", style: "flex:1 1 300px" }, h("h2", null, "General: todas las cuentas"),
@@ -1315,15 +1339,16 @@ function personalSummary(d, month, year) {
         d.due.length ? h("div", { class: "stack", style: "gap:4px" }, h("b", { class: "small" }, "Próximos pagos de tarjeta"), d.due.map((x) => h("span", { class: "small" }, `${x.nickname} •••• ${x.last4}: ${fdate(x.due_date)}`))) : "")),
     h("h2", { style: "margin:0" }, "Por cuenta"),
     d.per_account.length ? h("div", { class: "grid g3" }, d.per_account.map(acctCard)) : h("p", { class: "empty" }, "Todavía no hay cuentas. Conéctalas o agrégalas en Cuentas y tarjetas."),
-    h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Últimos movimientos"), h("a", { href: `#/personal/movimientos?${year ? "anio=" + year : "mes=" + month}`, style: "font-weight:700" }, "Ver todos →")),
+    h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Últimos movimientos"), h("a", { href: `${PB()}/movimientos?${year ? "anio=" + year : "mes=" + month}`, style: "font-weight:700" }, "Ver todos →")),
       d.items.length ? movesTable(d.items.slice(0, 8), d.categories, d.people) : h("p", { class: "empty" }, "No hay movimientos en este período.")));
 }
 // De quién es el dinero: Mío (personal, predeterminado), Starkum, y las personas registradas
-const ownerList = (people) => [["personal", "Mío (personal)"], ["starkum", "Starkum (empresa)"], ...(people || []).map((x) => [x.id, x.name])];
+const ownerList = (people) => [[SELF(), "Mío"], ...(state.space && state.space !== "personal" ? [] : [["starkum", "Starkum (empresa)"]]), ...(people || []).map((x) => [x.id, x.name])];
 const ownerName = (id, people) => (ownerList(people).find(([k]) => k === id) || [id, id === "otro" ? "Otra persona" : id])[1];
 function ownerSelect(x, people) {
-  const sel = h("select", { "aria-label": "De quién es este movimiento", style: "width:auto;max-width:170px" + (x.owner !== "personal" ? ";font-weight:700" : "") },
-    ownerList(people).map(([k, l]) => h("option", { value: k, selected: k === x.owner }, l)));
+  const opts = ownerList(people); if (x.owner === "starkum" && !opts.some(([k]) => k === "starkum")) opts.push(["starkum", "Starkum (empresa)"]);
+  const sel = h("select", { "aria-label": "De quién es este movimiento", style: "width:auto;max-width:170px" + (x.owner !== SELF() ? ";font-weight:700" : ""), disabled: x.owner === "starkum" && state.space && state.space !== "personal" },
+    opts.map(([k, l]) => h("option", { value: k, selected: k === x.owner }, l)));
   sel.onchange = async () => {
     const v = sel.value;
     if (v === x.owner) return;
@@ -1338,11 +1363,11 @@ function ownerSelect(x, people) {
 function movesTable(items, cats, people) {
   const setCat = async (x, cat) => { const r = await api("/personal/lines/" + x.id, { method: "PUT", body: { category: cat, learn: true } }); toast(r.same ? `Listo. También cambié ${r.same} movimiento(s) del mismo comercio y lo recordaré.` : "Listo. Lo recordaré para este comercio."); route(); };
   return h("div", { class: "tablewrap" }, h("table", { style: "min-width:720px" }, h("thead", null, h("tr", null, ["Fecha", "Descripción", "Categoría", "Monto", "De quién", ""].map((c) => h("th", null, c)))),
-    h("tbody", null, items.map((x) => h("tr", { style: x.owner && x.owner !== "personal" ? "opacity:.7" : "" }, h("td", { class: "mono" }, fdate(x.date)),
+    h("tbody", null, items.map((x) => h("tr", { style: x.owner && x.owner !== SELF() ? "opacity:.7" : "" }, h("td", { class: "mono" }, fdate(x.date)),
       h("td", { class: "small" }, h("b", { style: "color:var(--ink)" }, x.desc), x.pending ? [" ", pill("Pendiente", "warn")] : "", h("div", { class: "muted" }, x.kind === "manual" ? "Movimiento manual" : x.card)),
       h("td", null, x.kind === "banco" && x.status !== "empresa" ? h("select", { "aria-label": "Categoría", style: "width:auto;max-width:210px", onchange: (e) => setCat(x, e.target.value) }, cats.map((c) => h("option", { selected: c === x.category }, c))) : h("span", { class: "small" }, x.status === "empresa" ? "Pasado a la empresa" : x.category)),
-      h("td", { class: "mono", style: x.amount > 0 ? "color:var(--ok)" : "" }, (x.amount < 0 ? "−" : "+") + money(Math.abs(x.amount))),
-      h("td", null, x.kind === "banco" ? ownerSelect(x, people) : h("span", { class: "small" }, "Mío (personal)")),
+      h("td", { class: "mono", style: x.amount > 0 ? "color:var(--ok)" : "" }, (x.amount < 0 ? "−" : "+") + money(Math.abs(x.amount), x.cur), x.cur === "VES" && x.usd ? h("div", { class: "small muted" }, "≈ " + money(Math.abs(x.usd))) : ""),
+      h("td", null, x.kind === "banco" ? ownerSelect(x, people) : h("span", { class: "small" }, "Mío")),
       h("td", null, h("span", { class: "row", style: "gap:10px" },
         x.kind === "banco" && x.status !== "empresa" ? h("button", { class: "linkbtn small", type: "button", onclick: async () => { await api("/bank/lines/" + x.id, { method: "PUT", body: { status: "ignorado" } }); toast("Ignorado: ya no cuenta en tus gastos."); route(); } }, "Ignorar") : "",
         x.kind === "manual" ? h("button", { class: "linkbtn small", type: "button", style: "color:var(--bad)", onclick: () => confirmDelete("Eliminar movimiento", "Se borra este movimiento manual.", async () => { await api("/moves/" + x.id, { method: "DELETE" }); route(); }) }, "Eliminar") : "")))))));
@@ -1353,8 +1378,8 @@ function personalMoves(d, month, year) {
   const draw = () => box.replaceChildren(movesTable(d.items.filter((x) => (!cat || x.category === cat) && (!acct || x.card_id === acct) && (!who || x.owner === who) && (!text || x.desc.toLowerCase().includes(text))), d.categories, d.people));
   draw();
   return h("div", { class: "stack", style: "gap:16px" },
-    h("div", { class: "row between" }, monthNav("#/personal/movimientos", month, year), h("div", { class: "row only-admin", style: "gap:8px" },
-      h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog({ id: "personal", name: "Personal" }) }, "Leer extracto"),
+    h("div", { class: "row between" }, monthNav(PB() + "/movimientos", month, year), h("div", { class: "row only-admin", style: "gap:8px" },
+      h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog({ id: FENT(), name: "Personal" }) }, "Leer extracto"),
       h("button", { class: "btn primary sm", type: "button", onclick: () => personalMoveDialog(d.categories) }, "+ Movimiento manual"))),
     h("div", { class: "row", style: "gap:10px;flex-wrap:wrap" }, h("input", { type: "search", placeholder: "Buscar comercio o descripción", style: "max-width:300px", oninput: (e) => { text = e.target.value.toLowerCase(); draw(); } }),
       h("select", { "aria-label": "Filtrar por categoría", style: "width:auto", onchange: (e) => { cat = e.target.value; draw(); } }, h("option", { value: "" }, "Todas las categorías"), d.categories.map((c) => h("option", null, c))),
@@ -1366,9 +1391,9 @@ function personalMoveDialog(cats) {
   modal("Movimiento manual", () => h("div", { class: "stack" },
     h("div", { class: "fgrid" }, fld("Tipo", h("select", { name: "kind" }, [["gasto", "Gasto"], ["ingreso", "Ingreso"], ["transferencia", "Transferencia"]].map(([k, l]) => h("option", { value: k }, l)))),
       fld("Categoría", h("select", { name: "category" }, cats.map((c) => h("option", { selected: c === "Otros" }, c)))), fld("Fecha", h("input", { name: "moved_on", type: "date", required: true, value: new Date().toISOString().slice(0, 10) }))),
-    h("div", { class: "fgrid" }, fld("Monto", h("input", { name: "amount", type: "number", step: "0.01", required: true, inputmode: "decimal" })), fld("Moneda", h("select", { name: "currency" }, ["USD", "COP"].map((c) => h("option", null, c))))),
+    h("div", { class: "fgrid" }, fld("Monto", h("input", { name: "amount", type: "number", step: "0.01", required: true, inputmode: "decimal" })), fld("Moneda", h("select", { name: "currency" }, [["USD", "Dólares (USD)"], ["VES", "Bolívares (Bs.)"], ["COP", "Pesos (COP)"]].map(([c, l]) => h("option", { value: c }, l))))),
     fld("Concepto", h("input", { name: "concept", required: true, placeholder: "Por ejemplo: efectivo para el mercado" }))),
-  async (fd) => { fd.set("entity_id", "personal"); await api("/moves", { method: "POST", body: fd }); toast("Movimiento agregado."); route(); }, "Agregar");
+  async (fd) => { fd.set("entity_id", FENT()); await api("/moves", { method: "POST", body: fd }); toast("Movimiento agregado."); route(); }, "Agregar");
 }
 function toCompanyDialog(x) {
   modal("Pasar a la empresa", () => h("div", { class: "stack" },
@@ -1391,18 +1416,22 @@ function balanceLine(c) {
   const debt = c.card_type !== "debito" && c.balance < 0;
   return h("span", { class: "stack", style: "gap:0" },
     h("b", { class: "mono", style: `font-size:22px;${debt ? "color:var(--warn)" : ""}` }, balanceText(c)),
-    h("span", { class: "small muted" }, c.balance == null ? (c.sfin_id ? "Sincroniza para traer el saldo" : "Actualízalo a mano o conéctala") : `${c.card_type === "debito" ? "Saldo disponible" : c.card_type === "prestamo" ? "Saldo del préstamo" : "Saldo de la tarjeta"} al ${fdate(c.balance_at)}${c.sfin_id ? " · automático" : ""}${c.others_money ? (c.money_owner && c.money_owner !== "personal" ? " · dinero de " + ownerName(c.money_owner, state.people) : " · no es tu dinero") : ""}`),
+    h("span", { class: "small muted" }, c.balance == null ? (c.sfin_id ? "Sincroniza para traer el saldo" : "Actualízalo a mano o conéctala") : `${c.card_type === "debito" ? "Saldo disponible" : c.card_type === "prestamo" ? "Saldo del préstamo" : "Saldo de la tarjeta"} al ${fdate(c.balance_at)}${c.sfin_id ? " · automático" : ""}${!isMine(c) ? (effOwner(c) ? " · dinero de " + ownerName(effOwner(c), state.people) : " · no es tu dinero") : ""}`),
     ledgerNote(c) ? h("span", { class: "small muted" }, ledgerNote(c)) : "");
 }
+// ¿El dinero de esta cuenta es de quien mira el perfil?
+const effOwner = (c) => c.money_owner || (String(c.entity_id || "").startsWith("sp:") ? SELF() : c.others_money ? null : "personal");
+const isMine = (c) => effOwner(c) === SELF();
 function balancesTable(cards) {
-  const mine = cards.filter((c) => !c.others_money);
-  const cash = mine.filter((c) => c.card_type === "debito").reduce((s2, c) => s2 + (effBal(c) || 0), 0);
-  const owed = mine.filter((c) => c.card_type !== "debito").reduce((s2, c) => s2 + Math.abs(Math.min(0, Number(c.balance) || 0)), 0);
+  const mine = cards.filter(isMine);
+  const fx = state.fxRate || 0; const toUsd = (c, v) => (c.currency === "VES" ? (fx ? v / fx : 0) : v);
+  const cash = mine.filter((c) => c.card_type === "debito").reduce((s2, c) => s2 + toUsd(c, effBal(c) || 0), 0);
+  const owed = mine.filter((c) => c.card_type !== "debito").reduce((s2, c) => s2 + Math.abs(Math.min(0, toUsd(c, Number(c.balance) || 0))), 0);
   return h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Saldos actuales"),
       h("span", { class: "small" }, "Tuyo: ", h("b", { class: "mono" }, money(cash)), " en cuentas · ", h("b", { class: "mono", style: "color:var(--warn)" }, money(owed)), " de deuda · patrimonio ", h("b", { class: "mono" }, money(cash - owed)))),
     h("div", { class: "tablewrap" }, h("table", { style: "min-width:560px" }, h("thead", null, h("tr", null, ["Cuenta", "Banco", "Tipo", "Saldo disponible / deuda", "Actualizado"].map((t) => h("th", null, t)))),
-      h("tbody", null, byBank(cards).flatMap(([, list]) => list).map((c) => h("tr", { style: c.others_money ? "opacity:.65" : "" },
-        h("td", null, h("b", null, c.nickname), " ", h("span", { class: "muted small" }, "•••• " + c.last4), c.others_money ? [" ", pill(c.money_owner && c.money_owner !== "personal" ? "Dinero de " + ownerName(c.money_owner, state.people) : "No es tu dinero", "info")] : ""),
+      h("tbody", null, byBank(cards).flatMap(([, list]) => list).map((c) => h("tr", { style: !isMine(c) ? "opacity:.65" : "" },
+        h("td", null, h("b", null, c.nickname), " ", h("span", { class: "muted small" }, "•••• " + c.last4), c.shared ? [" ", pill("Compartida", "ok")] : "", !isMine(c) ? [" ", pill(effOwner(c) ? "Dinero de " + ownerName(effOwner(c), state.people) : "No es tu dinero", "info")] : ""),
         h("td", { class: "small" }, bankOf(c.issuer)), h("td", { class: "small" }, CTYPE[c.card_type]),
         h("td", { class: "mono", style: c.card_type !== "debito" && c.balance < 0 ? "color:var(--warn);font-weight:700" : "font-weight:700" }, balanceText(c), ledgerNote(c) ? h("div", { class: "small muted", style: "font-weight:400" }, "contable " + money(c.balance)) : ""),
         h("td", { class: "small muted" }, c.balance_at ? fdate(c.balance_at) : "—")))))));
@@ -1414,6 +1443,16 @@ function balanceDialog(c) {
   async (fd) => { const v = Math.abs(Number(fd.get("balance")) || 0); await api(`/personal/accounts/${c.id}/balance`, { method: "PUT", body: { balance: c.card_type === "debito" ? v : -v } }); toast("Saldo actualizado."); route(); });
 }
 let sfinCheck = false;
+// Cuentas del perfil que no vienen de su conexión: manuales (por ejemplo, las venezolanas) y las compartidas desde otro perfil
+function looseBox(pcards, accounts) {
+  const mapped = new Set(accounts.filter((a) => a.card).map((a) => a.card.id));
+  const loose = pcards.filter((c) => c.active !== 0 && !mapped.has(c.id) && (!c.sfin_id || (state.space && state.space !== "personal")));
+  return loose.length ? h("div", { class: "stack", style: "gap:6px;padding-top:6px" }, h("b", { class: "small" }, state.space && state.space !== "personal" ? "Otras cuentas de este perfil" : "Cuentas sin conexión automática"),
+    ...loose.map((c) => h("div", { class: "row between", style: "padding:6px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" },
+      h("span", null, h("b", null, c.nickname), h("span", { class: "small muted" }, ` · ${bankOf(c.issuer)} · •••• ${c.last4}` + (c.currency === "VES" ? " · bolívares" : "")), c.shared ? [" ", pill("Compartida · se actualiza sola", "ok")] : !c.sfin_id ? [" ", pill("Saldo a mano o por extracto")] : ""),
+      h("label", { class: "row small", style: "gap:6px;white-space:nowrap;cursor:pointer" }, h("input", { type: "checkbox", checked: !c.hide_summary, style: "width:auto", onchange: async (e) => { const on = e.target.checked; e.target.disabled = true;
+        try { await api(`/personal/accounts/${c.id}/visible`, { method: "PUT", body: { show: on } }); toast(on ? `${c.nickname}: se muestra en el Resumen.` : `${c.nickname}: oculta en el Resumen.`); } catch (err) { e.target.checked = !on; toast(err.message); } finally { e.target.disabled = false; } } }), "Mostrar en Resumen")))) : "";
+}
 async function sfinView() {
   const d = await api("/personal/summary");
   const st = d.sfin;
@@ -1440,7 +1479,8 @@ async function sfinView() {
   let accBox = "";
   if (st.connected) {
     const doCheck = sfinCheck; sfinCheck = false;
-    const [r, { cards }] = await Promise.all([api("/personal/sfin/accounts" + (doCheck ? "?check=1" : "")).catch((e) => ({ error: e.message })), api("/cards")]);
+    const inSpace = state.space && state.space !== "personal";
+    const [r, { cards }] = await Promise.all([api("/personal/sfin/accounts" + (doCheck ? "?check=1" : "")).catch((e) => ({ error: e.message })), inSpace ? Promise.resolve({ cards: [] }) : api("/cards")]);
     const ck = doCheck && r.check ? r.check : null;
     const checkBox = ck ? h("div", { class: "card stack", style: "gap:4px;background:var(--line);border-color:" + (ck.added.length || ck.removed.length ? "var(--warn)" : "var(--line)") },
       h("b", null, ck.added.length || ck.removed.length ? "Hay cambios en SimpleFIN" : "Todo al día: no hay cuentas nuevas ni eliminadas."),
@@ -1452,7 +1492,7 @@ async function sfinView() {
       ...r.missing.map((c) => h("div", { class: "row between", style: "flex-wrap:wrap;gap:8px" }, h("span", null, `${c.nickname} •••• ${c.last4}`, " ", pill("Eliminada en SimpleFIN", "warn")),
         h("button", { class: "btn sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => { await api("/personal/sfin/map", { method: "POST", body: { sfin_id: c.sfin_id, card_id: null } }); toast("Vínculo quitado. La cuenta y sus movimientos se quedan."); route(); }) }, "Quitar vínculo"))),
       h("span", { class: "small muted" }, "Si la volviste a conectar en SimpleFIN, aparece como cuenta nueva: asígnala a la misma cuenta y sigue donde iba.")) : "";
-    const pcards = (await api("/cards?entity=personal")).cards;
+    const pcards = (await api("/cards?entity=" + FENT())).cards;
     const all = [...cards, ...pcards.filter((c) => !cards.some((x) => x.id === c.id))];
     accBox = h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Cuentas conectadas"),
         h("span", { class: "row", style: "gap:8px" }, h("button", { class: "btn sm", type: "button", title: "Revisa en SimpleFIN si agregaste o eliminaste cuentas", onclick: (e) => busy(e.currentTarget, async () => { sfinCheck = true; await route(); }) }, "↻ Actualizar cuentas"),
@@ -1472,14 +1512,11 @@ async function sfinView() {
           "Mostrar en Resumen") : h("span", { class: "small muted", style: "white-space:nowrap" }, "Asígnala para mostrarla");
         return h("div", { class: "row between", style: "padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", { class: "stack", style: "gap:2px" }, h("span", null, h("b", null, a.name), a.is_new ? [" ", pill("Nueva", "ok")] : !a.card ? [" ", pill("Sin asignar")] : ""), h("span", { class: "small muted" }, `${a.org} · ` + (a.balance < 0 ? `debes ${money(Math.abs(a.balance), a.currency || "USD")}` : `disponible ${money(a.available ? a.available : a.balance || 0, a.currency || "USD")}`))), h("span", { class: "row", style: "gap:14px;flex-wrap:wrap" }, vis, sel));
       })),
-      (() => { const loose = pcards.filter((c) => c.active !== 0 && !c.sfin_id);
-        return loose.length ? h("div", { class: "stack", style: "gap:6px;padding-top:6px" }, h("b", { class: "small" }, "Cuentas sin conexión automática"),
-          ...loose.map((c) => h("div", { class: "row between", style: "padding:6px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px" }, h("span", null, h("b", null, c.nickname), h("span", { class: "small muted" }, ` · ${bankOf(c.issuer)} · •••• ${c.last4}`)),
-            h("label", { class: "row small", style: "gap:6px;white-space:nowrap;cursor:pointer" }, h("input", { type: "checkbox", checked: !c.hide_summary, style: "width:auto", onchange: async (e) => { const on = e.target.checked; e.target.disabled = true;
-              try { await api(`/personal/accounts/${c.id}/visible`, { method: "PUT", body: { show: on } }); toast(on ? `${c.nickname}: se muestra en el Resumen.` : `${c.nickname}: oculta en el Resumen.`); } catch (err) { e.target.checked = !on; toast(err.message); } finally { e.target.disabled = false; } } }), "Mostrar en Resumen")))) : ""; })(),
-      h("p", { class: "small muted", style: "margin:0" }, "Si una cuenta es de la empresa (por ejemplo, la Chase de Starkum), asígnala a la cuenta de la LLC: sus movimientos llegan solos a la conciliación del banco de la empresa."));
+      looseBox(pcards, r.accounts || []),
+      h("p", { class: "small muted", style: "margin:0" }, state.space && state.space !== "personal" ? "Las cuentas de Venezuela no están en SimpleFIN: agrégalas en \"Cuentas y tarjetas\" con moneda Bolívares y actualiza su saldo a mano o leyendo el extracto." : "Si una cuenta es de la empresa (por ejemplo, la Chase de Starkum), asígnala a la cuenta de la LLC: sus movimientos llegan solos a la conciliación del banco de la empresa."));
   }
-  return h("div", { class: "stack", style: "gap:16px" }, vaultBox, connectBox, accBox);
+  if (!st.connected && state.space && state.space !== "personal") { const pc = (await api("/cards?entity=" + FENT())).cards; const lb = looseBox(pc, []); if (lb) accBox = h("section", { class: "card stack" }, lb); }
+  return h("div", { class: "stack", style: "gap:16px" }, state.owner ? vaultBox : "", connectBox, accBox);
 }
 // ---------- bancos de la empresa (como "Mis finanzas", pero de la empresa) ----------
 async function companyBanks(ent, q) {
@@ -2286,28 +2323,72 @@ async function pageSearch(qs) {
   shell(page, "");
 }
 
+// Dar o cambiar acceso: se marca a qué puede entrar (empresas con su rol y cada perfil de finanzas)
+function accessDialog(u, spaces) {
+  const acc = u?.access || { companies: true, spaces: [] };
+  modal(u ? "Cambiar acceso de " + u.email : "Dar acceso", () => {
+    const comp = h("input", { type: "checkbox", name: "companies", checked: acc.companies, style: "width:auto", disabled: !state.owner });
+    const role = h("select", { name: "role" }, ["standard", "viewer", "admin"].map((r) => h("option", { value: r, selected: (u?.role === "member" ? "standard" : u?.role || "standard") === r }, ROLE_LABEL[r])));
+    const roleBox = fld("Rol en las empresas", role);
+    const sync = () => { roleBox.style.display = comp.checked ? "" : "none"; };
+    comp.onchange = sync; setTimeout(sync);
+    return h("div", { class: "stack" },
+      u ? h("input", { type: "hidden", name: "email", value: u.email }) : fld("Correo", h("input", { name: "email", type: "email", required: true })),
+      fld("Nombre", h("input", { name: "name", value: u?.name || "" })),
+      h("fieldset", { class: "stack", style: "gap:8px" }, h("legend", null, "¿A qué le das acceso?"),
+        h("label", { class: "row", style: "gap:10px;align-items:flex-start;flex-wrap:nowrap;cursor:pointer" }, comp, h("span", { style: "flex:1;min-width:0" }, h("b", null, "Empresas"), h("br"), h("span", { class: "small muted" }, "Starkum Holdings LLC y Starkum Group SAS, con el rol que elijas abajo."))),
+        roleBox,
+        ...spaces.map((x) => h("label", { class: "row", style: "gap:10px;align-items:flex-start;flex-wrap:nowrap;cursor:pointer" }, h("input", { type: "checkbox", name: "space", value: x.id, checked: acc.spaces.includes(x.id), style: "width:auto", disabled: !state.owner }),
+          h("span", { style: "flex:1;min-width:0" }, h("b", null, x.name), h("br"), h("span", { class: "small muted" }, "Lo administra: ve y cambia todo dentro de ese perfil. No ve nada más.")))),
+        !state.owner ? h("p", { class: "small muted", style: "margin:0" }, "Solo el dueño puede autorizar perfiles de finanzas.") : "",
+        h("p", { class: "small muted", style: "margin:0" }, "\"Mis finanzas\" y el acceso total quedan solo para " + "el dueño.")),
+      h("ul", { class: "small muted", style: "margin:0;padding-left:18px" }, ["admin", "standard", "viewer"].map((r) => h("li", null, h("b", null, ROLE_LABEL[r] + ": "), ROLE_HELP[r] + " (en las empresas)"))));
+  }, async (fd) => {
+    const companies = fd.get("companies") === "on"; const sps = fd.getAll("space");
+    if (!companies && !sps.length) throw new Error("Marca al menos una cosa a la que tendrá acceso.");
+    await api("/users", { method: "POST", body: { email: fd.get("email"), name: fd.get("name"), role: companies ? fd.get("role") : "admin", access: state.owner ? { companies, spaces: sps } : undefined } });
+    toast(u ? "Acceso actualizado." : "Acceso dado. Ya puede entrar con su correo."); route();
+  }, u ? "Guardar" : "Dar acceso");
+}
+// Perfiles de finanzas: crear uno y elegir qué cuentas de Mis finanzas se comparten en él
+function spacesSection(spaces, myCards) {
+  return h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Perfiles de finanzas"),
+      h("button", { class: "btn sm", type: "button", onclick: () => modal("Nuevo perfil de finanzas", () => h("div", { class: "stack" }, fld("Nombre de la persona", h("input", { name: "person_name", required: true, placeholder: "Por ejemplo: Dayana" })),
+        h("p", { class: "small muted", style: "margin:0" }, "Se crea \"Finanzas <nombre>\" con las mismas pestañas que Mis finanzas. Después eliges qué cuentas tuyas compartir y le das acceso a la persona.")),
+        async (fd) => { await api("/spaces", { method: "POST", body: { person_name: fd.get("person_name") } }); toast("Perfil creado."); route(); }, "Crear") }, "+ Nuevo perfil")),
+    h("p", { class: "small muted", style: "margin:0" }, "Una cuenta compartida es la misma en los dos perfiles: lo que se cambie en uno (categorías, de quién es cada movimiento) se ve en el otro. Ocultarla en el Resumen es de cada perfil."),
+    spaces.length ? h("div", { class: "stack", style: "gap:14px" }, spaces.map((x) => h("div", { class: "stack", style: "gap:6px;padding:10px;border:1px solid var(--line);border-radius:10px" },
+      h("div", { class: "row between" }, h("b", null, x.name), h("a", { class: "small", href: "#/finanzas/" + x.id, style: "font-weight:700" }, "Abrir →")),
+      h("span", { class: "small muted" }, "Cuentas tuyas compartidas en este perfil:"),
+      h("div", { class: "row", style: "gap:6px 16px;flex-wrap:wrap" }, myCards.map((c) => h("label", { class: "row small", style: "gap:6px;cursor:pointer" },
+        h("input", { type: "checkbox", checked: (x.cards || []).includes(c.id), style: "width:auto", onchange: async (e) => { const on = e.target.checked; try { await api(`/spaces/${x.id}/share`, { method: "PUT", body: { card_id: c.id, on } }); toast(on ? `${c.nickname}: compartida.` : `${c.nickname}: ya no se comparte.`); } catch (err) { e.target.checked = !on; toast(err.message); } } }),
+        `${c.nickname} •••• ${c.last4}`)))))) : h("p", { class: "empty" }, "Todavía no hay perfiles."));
+}
 async function pageSettings() {
   shell(loading(), "ajustes");
   const [{ users }, { recipients }, usage, { sends }] = await Promise.all([api("/users"), api("/recipients"), api("/usage"), api("/sends")]);
   const admin = state.user.role === "admin";
+  const spaces = state.owner ? (await api("/spaces")).spaces.filter((x) => x.id !== "personal") : [];
+  const myCards = state.owner ? (await api("/cards?entity=personal")).cards : [];
   const pct = Math.min(100, usage.bytes / usage.free * 100);
   const orphans = state.businesses.filter((b) => !b.entity_id);
   const page = h("div", { class: "page" }, h("div", { class: "head" }, h("div", null, h("span", { class: "eyebrow" }, "Configuración"), h("h1", null, "Accesos y ajustes"))),
     orphans.length ? h("section", { class: "card stack" }, h("h2", null, "Negocios sin empresa asignada"), h("p", { class: "small muted", style: "margin:0" }, "No aparecen dentro de ninguna empresa hasta que les asignes una."),
       h("div", { class: "list" }, orphans.map((b) => h("div", null, h("b", null, b.name), h("span", { class: "row", style: "gap:10px" }, h("a", { href: "#/negocio/" + b.id }, "Abrir"), h("button", { class: "linkbtn only-admin", type: "button", onclick: () => businessDialog(b) }, "Asignar empresa")))))) : "",
     h("div", { class: "grid g2" },
-      h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Quién puede entrar"), admin ? h("button", { class: "btn sm", type: "button", onclick: () => modal("Dar acceso", () => h("div", { class: "stack" }, fld("Correo", h("input", { name: "email", type: "email", required: true })), fld("Nombre", h("input", { name: "name" })), fld("Rol", h("select", { name: "role" }, ["standard", "viewer", "admin"].map((r) => h("option", { value: r }, ROLE_LABEL[r])))),
-          h("ul", { class: "small muted", style: "margin:0;padding-left:18px" }, ["admin", "standard", "viewer"].map((r) => h("li", null, h("b", null, ROLE_LABEL[r] + ": "), ROLE_HELP[r])))),
-        async (fd) => { await api("/users", { method: "POST", body: Object.fromEntries(fd) }); toast("Acceso dado."); route(); }, "Dar acceso") }, "+ Dar acceso") : ""),
-        h("div", { class: "list" }, users.filter((u) => u.active).map((u) => h("div", null, h("span", { class: "stack", style: "gap:0" }, h("b", null, u.email), h("span", { class: "small muted" }, [...new Set([u.name, ROLE_LABEL[u.role === "member" ? "standard" : u.role]].filter(Boolean))].join(" · "))),
-          admin && u.email !== state.user.email ? h("select", { "aria-label": "Rol de " + u.email, style: "padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel)", onchange: async (e) => { try { await api("/users", { method: "POST", body: { email: u.email, name: u.name, role: e.target.value } }); toast("Rol actualizado."); } catch (x) { toast(x.message, true); } } },
-            ["admin", "standard", "viewer"].map((r) => h("option", { value: r, selected: (u.role === "member" ? "standard" : u.role) === r }, ROLE_LABEL[r]))) : "",
-          admin && u.email !== state.user.email ? h("button", { class: "linkbtn small", type: "button", onclick: async () => { await api("/users/" + encodeURIComponent(u.email), { method: "DELETE" }); toast("Acceso quitado."); route(); } }, "Quitar acceso") : "")))),
+      h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Quién puede entrar"), admin ? h("button", { class: "btn sm", type: "button", onclick: () => accessDialog(null, spaces) }, "+ Dar acceso") : ""),
+        h("div", { class: "list" }, users.filter((u) => u.active).map((u) => { const isOwnerRow = u.email === state.user.email && state.owner;
+          const summary = isOwnerRow ? "Dueño · acceso total a empresas y a todos los perfiles" : [u.access.companies ? "Empresas: " + (ROLE_LABEL[u.role === "member" ? "standard" : u.role] || "") : "", ...u.access.spaces.map((sid) => "Administra " + ((spaces.find((x) => x.id === sid) || {}).name || sid))].filter(Boolean).join(" · ");
+          return h("div", null, h("span", { class: "stack", style: "gap:0" }, h("b", null, u.email), h("span", { class: "small muted" }, [u.name, summary].filter(Boolean).join(" · "))),
+            h("span", { class: "row", style: "gap:10px" },
+              admin && u.email !== state.user.email && (state.owner || u.access.companies) ? h("button", { class: "linkbtn small", type: "button", onclick: () => accessDialog(u, spaces) }, "Cambiar acceso") : "",
+              admin && u.email !== state.user.email ? h("button", { class: "linkbtn small", type: "button", onclick: async () => { await api("/users/" + encodeURIComponent(u.email), { method: "DELETE" }); toast("Acceso quitado."); route(); } }, "Quitar acceso") : "")); }))),
       h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Correos que pueden recibir documentos"), admin ? h("button", { class: "btn sm", type: "button", onclick: () => modal("Autorizar correo", () => h("div", { class: "stack" }, fld("Correo", h("input", { name: "email", type: "email", required: true })), fld("Etiqueta", h("input", { name: "label", placeholder: "Mi Gmail, contador…" })),
         h("p", { class: "small muted", style: "margin:0" }, "Este correo también debe estar verificado en Cloudflare (Email Routing › Destination addresses).")),
         async (fd) => { await api("/recipients", { method: "POST", body: Object.fromEntries(fd) }); toast("Correo autorizado."); route(); }, "Autorizar") }, "+ Autorizar") : ""),
         recipients.length ? h("div", { class: "list" }, recipients.map((r) => h("div", null, h("span", { class: "stack", style: "gap:0" }, h("b", null, r.email), h("span", { class: "small muted" }, r.label || "")),
           admin ? h("button", { class: "linkbtn small", type: "button", onclick: async () => { await api("/recipients/" + encodeURIComponent(r.email), { method: "DELETE" }); toast("Correo quitado."); route(); } }, "Quitar") : ""))) : h("p", { class: "empty" }, "Ninguno todavía."))),
+    state.owner ? spacesSection(spaces, myCards) : "",
     h("section", { class: "card stack" }, h("h2", null, "Almacenamiento y lectura automática"),
       h("div", { class: "row between small" }, h("span", null, `${bytes(usage.bytes)} usados de ${bytes(usage.free)} gratis · ${usage.n} archivos`), usage.original > usage.bytes ? h("span", { class: "muted" }, `La compresión ahorró ${bytes(usage.original - usage.bytes)}`) : ""),
       h("div", { class: "meter", role: "img", "aria-label": `Usado ${pct.toFixed(1)}%` }, h("i", { style: `width:${Math.max(pct, 0.5)}%` })),
@@ -2329,9 +2410,10 @@ async function route() {
   const q = new URLSearchParams(qs || "");
   const parts = path.split("/").filter(Boolean);
   try {
-    if (!parts.length) return await pageHome();
+    if (!parts.length || (state.spaceOnly && !["personal", "finanzas"].includes(parts[0]))) return await pageHome();
     if (parts[0] === "plataformas") return await pagePlatforms();
-    if (parts[0] === "personal") return await pagePersonal(parts[1], q);
+    if (parts[0] === "personal") return await pagePersonal(parts[1], q, "personal");
+    if (parts[0] === "finanzas") return await pagePersonal(parts[2], q, parts[1]);
     if (parts[0] === "empresa" && parts[2] === "proveedor") return await pageSupplier("entity", parts[1], parts[3], q);
     if (parts[0] === "empresa") return await pageEntity(parts[1], parts[2], q);
     if (parts[0] === "negocio" && parts[2] === "proveedor") return await pageSupplier("business", parts[1], parts[3], q);
@@ -2351,8 +2433,10 @@ async function boot() {
     const { user } = await api("/me");
     state.user = user;
     document.body.dataset.role = user.role;
-    const [{ businesses }, { entities }] = await Promise.all([api("/businesses"), api("/entities")]);
+    const [{ businesses }, { entities, owner }] = await Promise.all([api("/businesses"), api("/entities")]);
     state.businesses = businesses; state.entities = entities;
+    state.spaceOnly = !entities.some((e) => !isFinEnt(e.id)); state.owner = !!owner;
+    if (state.spaceOnly) document.body.dataset.role = "admin";
     try { const e = localStorage.getItem("empresa"); if (e && entities.some((x) => x.id === e)) state.entity = e; } catch { /* sin almacenamiento */ }
     route();
   } catch { /* la pantalla de acceso ya se mostró */ }
