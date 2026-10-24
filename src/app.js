@@ -2389,9 +2389,9 @@ async function pageSettings() {
     h("div", { class: "grid g2" },
       h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Quién puede entrar"), admin ? h("button", { class: "btn sm", type: "button", onclick: () => accessDialog(null, spaces) }, "+ Dar acceso") : ""),
         h("div", { class: "list" }, users.filter((u) => u.active).map((u) => { const isOwnerRow = u.email === state.user.email && state.owner;
-          const LV = { admin: "administra", viewer: "solo ve" }; const lvs = u.access.levels || {};
-          const summary = isOwnerRow ? "Dueño · acceso total a empresas y a todos los perfiles" : [u.access.companies ? "Empresas: " + (ROLE_LABEL[u.role === "member" ? "standard" : u.role] || "") : "", ...Object.entries(lvs).map(([sid, l]) => (sid === "personal" ? "Mis finanzas" : (spaces.find((x) => x.id === sid) || {}).name || sid) + ": " + LV[l])].filter(Boolean).join(" · ");
-          return h("div", null, h("span", { class: "stack", style: "gap:0" }, h("b", null, u.email), h("span", { class: "small muted" }, [u.name, summary].filter(Boolean).join(" · "))),
+          const lvs = Object.values(u.access.levels || {});
+          const summary = isOwnerRow ? ROLE_LABEL.admin : u.access.companies ? ROLE_LABEL[u.role === "member" ? "standard" : u.role] || "" : lvs.includes("admin") ? ROLE_LABEL.admin : ROLE_LABEL.viewer;
+          return h("div", null, h("span", { class: "stack", style: "gap:0" }, h("b", null, u.email), h("span", { class: "small muted" }, [...new Set([u.name, summary].filter(Boolean))].join(" · "))),
             h("span", { class: "row", style: "gap:10px" },
               admin && u.email !== state.user.email && (state.owner || u.access.companies) ? h("button", { class: "linkbtn small", type: "button", onclick: () => accessDialog(u, spaces) }, "Cambiar acceso") : "",
               admin && u.email !== state.user.email ? h("button", { class: "linkbtn small", type: "button", onclick: async () => { await api("/users/" + encodeURIComponent(u.email), { method: "DELETE" }); toast("Acceso quitado."); route(); } }, "Quitar acceso") : "")); }))),
