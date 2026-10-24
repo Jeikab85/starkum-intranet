@@ -517,7 +517,9 @@ const ownerEmail = (env) => String(env.ADMIN_EMAIL || "contact@starkumholdings.c
 const spaceEnt = (sid) => (sid === "personal" ? "personal" : "sp:" + sid);
 // Cuentas de un perfil: el de Jonth ("personal") por su regla de siempre; los demás, las que se le asignaron
 async function spaceCards(env, sid) {
-  if (sid === "personal") return (await env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id = 'personal' OR (owner = 'personal' AND COALESCE(entity_id, '') NOT LIKE 'sp:%')) ORDER BY others_money, card_type DESC, nickname").all()).results;
+  // Mis finanzas: las cuentas personales y, para verlas en un solo lugar, también las de las empresas (su dinero es de Starkum)
+  if (sid === "personal") return (await env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id = 'personal' OR (owner = 'personal' AND COALESCE(entity_id, '') NOT LIKE 'sp:%') OR (owner = 'empresa' AND entity_id IN ('llc', 'sas'))) ORDER BY others_money, card_type DESC, nickname").all()).results
+    .map((c) => (c.owner === "empresa" && ["llc", "sas"].includes(c.entity_id) ? { ...c, company: true } : c));
   // Las propias del perfil (entity_id sp:…) y las compartidas desde otro perfil (space_cards); "oculta" es por perfil
   const rows = (await env.DB.prepare("SELECT c.*, sc.hidden AS sp_hidden, sc.space_id AS shared_in FROM cards c LEFT JOIN space_cards sc ON sc.card_id = c.id AND sc.space_id = ? WHERE c.active = 1 AND (c.entity_id = ? OR sc.space_id IS NOT NULL) ORDER BY c.card_type DESC, c.nickname").bind(sid, "sp:" + sid).all()).results;
   return rows.map(({ sp_hidden, shared_in, ...c }) => ({ ...c, hide_summary: shared_in ? sp_hidden : c.hide_summary, shared: !!shared_in && c.entity_id !== "sp:" + sid }));
@@ -1810,9 +1812,10 @@ async function api(req, env, url, user) {
     const needFx = accts.some((a) => a.currency === "VES") || moves.results.some((x) => x.currency === "VES");
     const fx = needFx ? await vesRate(env) : null;
     const toUsd = (v, cur) => (cur === "VES" ? (fx?.rate ? v / fx.rate : 0) : v);
-    const acctOwner = Object.fromEntries(accts.map((a) => [a.id, a.money_owner || (a.others_money ? "otro" : String(a.entity_id || "").startsWith("sp:") ? (a.entity_id === ent ? self : "otro") : "personal")]));
-    const lineOwner = (l) => (l.status === "empresa" ? "starkum" : l.owner || acctOwner[l.card_id] || (String(l.entity_id || "").startsWith("sp:") ? self : "personal"));
-    const all = [...lines.results.map((l) => { const ow = lineOwner(l); const cur = l.cur || "USD"; return { kind: "banco", id: l.id, date: l.posted_on, desc: l.description, amount: l.amount, cur, usd: toUsd(l.amount, cur), category: l.category || "Otros", card: l.card ? `${l.card} •••• ${l.last4}` : "", card_id: l.card_id, owner: ow, owner_default: acctOwner[l.card_id] || self, others: ow !== self, status: l.status, pending: l.pending }; }),
+    const companyIds = new Set(accts.filter((a) => a.company).map((a) => a.id));
+    const acctOwner = Object.fromEntries(accts.map((a) => [a.id, a.company ? "starkum" : a.money_owner || (a.others_money ? "otro" : String(a.entity_id || "").startsWith("sp:") ? (a.entity_id === ent ? self : "otro") : "personal")]));
+    const lineOwner = (l) => (l.status === "empresa" || companyIds.has(l.card_id) ? "starkum" : l.owner || acctOwner[l.card_id] || (String(l.entity_id || "").startsWith("sp:") ? self : "personal"));
+    const all = [...lines.results.map((l) => { const ow = lineOwner(l); const cur = l.cur || "USD"; const company = companyIds.has(l.card_id); return { kind: "banco", id: l.id, date: l.posted_on, desc: l.description, amount: l.amount, cur, usd: toUsd(l.amount, cur), company, category: company ? "Empresa (Starkum)" : l.category || "Otros", card: l.card ? `${l.card} •••• ${l.last4}` : "", card_id: l.card_id, owner: ow, owner_default: acctOwner[l.card_id] || self, others: ow !== self, status: l.status, pending: l.pending }; }),
       ...moves.results.map((x) => { const a = x.kind === "ingreso" ? x.amount : -x.amount; const cur = x.currency || "USD"; return { kind: "manual", id: x.id, date: x.moved_on, desc: x.concept, amount: a, cur, usd: toUsd(a, cur), category: x.category || (x.kind === "ingreso" ? "Ingresos" : "Otros"), card: "", owner: self }; })];
     const r2 = (v) => Math.round(v * 100) / 100;
     const tally = (list) => { const byCat = {}; let income = 0, spend = 0;
@@ -1824,7 +1827,8 @@ async function api(req, env, url, user) {
     const balUsd = (a) => toUsd(Number(a.card_type === "debito" && a.available ? a.available : a.balance) || 0, a.currency);
     const byPerson = people.map((pp) => { const accs = accts.filter((a) => acctOwner[a.id] === pp.id); const l = all.filter((x) => x.owner === pp.id);
       return { ...pp, n: l.length, cash: r2(accs.reduce((s2, a) => s2 + balUsd(a), 0)), accounts: accs.map((a) => a.nickname), ...tally(l) }; });
-    const starkum = all.filter((x) => x.owner === "starkum"); const toStarkum = r2(starkum.reduce((s2, x) => s2 - x.usd, 0));
+    // Lo que pagaste por Starkum desde tus cuentas (las cuentas de la empresa no cuentan aquí)
+    const starkum = all.filter((x) => x.owner === "starkum" && !x.company); const toStarkum = r2(starkum.reduce((s2, x) => s2 - x.usd, 0));
     // Quién movió dinero en cada cuenta y cuánto se deben entre personas (histórico, en dólares)
     const ownersIn = (l) => { const g = {}; for (const x of l) { const k = x.owner; g[k] = g[k] || { owner: k, n: 0, in: 0, out: 0 }; g[k].n++; if (x.amount > 0) g[k].in += x.amount; else g[k].out -= x.amount; }
       return Object.values(g).map((o) => ({ ...o, in: r2(o.in), out: r2(o.out), net: r2(o.in - o.out) })).sort((a, z) => z.n - a.n); };
@@ -1837,7 +1841,7 @@ async function api(req, env, url, user) {
       pairs[k] = pairs[k] || { a: a1, b: b1, owes: 0, n: 0 }; pairs[k].owes += sign * toUsd(l.amount, l.cur || "USD"); pairs[k].n++; }
     const between = Object.values(pairs).filter((x) => Math.abs(x.owes) > 0.004).map((x) => x.owes > 0 ? { debtor: x.a, creditor: x.b, amount: r2(x.owes), n: x.n } : { debtor: x.b, creditor: x.a, amount: r2(-x.owes), n: x.n });
     const perAccount = accts.map((a) => { const l = all.filter((x) => x.card_id === a.id); const t = tally(l);
-      return { id: a.id, nickname: a.nickname, issuer: a.issuer, last4: a.last4, card_type: a.card_type, currency: a.currency || "USD", shared: !!a.shared, others_money: !!a.others_money, balance: a.balance, available: a.available, balance_at: a.balance_at, balance_usd: a.currency === "VES" ? r2(balUsd(a)) : null, n: l.length, owners: ownersIn(l.filter((x) => x.kind === "banco")), in_total: r2(l.filter((x) => x.amount > 0).reduce((s2, x) => s2 + x.amount, 0)), out_total: r2(l.filter((x) => x.amount < 0).reduce((s2, x) => s2 - x.amount, 0)), ...t, money_owner: acctOwner[a.id] }; });
+      return { id: a.id, nickname: a.nickname, issuer: a.issuer, last4: a.last4, card_type: a.card_type, company: !!a.company, currency: a.currency || "USD", shared: !!a.shared, others_money: !!a.others_money, balance: a.balance, available: a.available, balance_at: a.balance_at, balance_usd: a.currency === "VES" ? r2(balUsd(a)) : null, n: l.length, owners: ownersIn(l.filter((x) => x.kind === "banco")), in_total: r2(l.filter((x) => x.amount > 0).reduce((s2, x) => s2 + x.amount, 0)), out_total: r2(l.filter((x) => x.amount < 0).reduce((s2, x) => s2 - x.amount, 0)), ...t, money_owner: acctOwner[a.id] }; });
     const sMap = Object.fromEntries(st.results.map((r) => [r.key.split(":")[0], r.value]));
     const byCat = mine.by_category;
     return json({ space: { id: sid, name: space.name, person: self, starkum: sid === "personal" }, month, year: yr, from, to, fx,
