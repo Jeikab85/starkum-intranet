@@ -75,7 +75,7 @@ async function api(path, opts = {}) {
   if (opts.body instanceof FormData) o.body = opts.body;
   else if (opts.body !== undefined) { o.body = JSON.stringify(opts.body); o.headers["content-type"] = "application/json"; }
   // Dentro de un perfil de finanzas, las rutas /personal/... van con su perfil
-  if (path.startsWith("/personal/") && state.space && state.space !== "personal" && !/[?&]space=/.test(path)) path += (path.includes("?") ? "&" : "?") + "space=" + encodeURIComponent(state.space);
+  if (state.space && (state.space !== "personal" || !state.owner) && !path.startsWith("/auth") && !/[?&]space=/.test(path)) path += (path.includes("?") ? "&" : "?") + "space=" + encodeURIComponent(state.space);
   const res = await fetch("/api" + path, o);
   const v = res.headers.get("x-app-version");
   if (v && v !== APP_VERSION) state.stale = true;
@@ -89,7 +89,13 @@ async function busy(btn, fn) {
   try { return await fn(); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; btn.textContent = label; }
 }
 const state = { user: null, businesses: [], entities: [], stale: false, entity: null };
-function setEntity(id) { if (!isFinEnt(id)) state.space = null; state.entity = id || null; try { id ? localStorage.setItem("empresa", id) : localStorage.removeItem("empresa"); } catch { /* sin almacenamiento */ } }
+// Perfil en "solo ver": se esconden y bloquean los controles que cambian algo (los filtros siguen funcionando)
+function lockReadOnly(root) {
+  if (!state.readOnly || !root) return;
+  root.querySelectorAll("select:not([aria-label^='Filtrar']), input[type=checkbox], input[name=tok]").forEach((x) => { x.disabled = true; });
+  root.querySelectorAll("main button:not(.tabbtn), main .linkbtn, main form button").forEach((x) => { if (!x.closest("dialog")) x.style.display = "none"; });
+}
+function setEntity(id) { if (!isFinEnt(id)) { state.space = null; state.readOnly = false; if (state.user) document.body.dataset.role = state.spaceOnly ? "admin" : state.user.role; }  state.entity = id || null; try { id ? localStorage.setItem("empresa", id) : localStorage.removeItem("empresa"); } catch { /* sin almacenamiento */ } }
 const APP_VERSION = "__APP_VERSION__";
 const ROLE_LABEL = { admin: "Administrador", standard: "Usuario estándar", viewer: "Solo consulta" };
 const ROLE_HELP = { admin: "Puede hacer todo: editar, eliminar, dar accesos.", standard: "Ve todo, sube facturas y documentos, revisa lo que sube y envía a correos autorizados. No edita ni elimina.", viewer: "Solo ve y descarga. No sube ni cambia nada." };
@@ -126,7 +132,7 @@ function shell(content, active) {
     h("a", { class: "brand", href: "#/" }, logo("light", 30), h("span", { class: "brandtext" }, h("b", null, "Starkum"), h("span", null, "Intranet"))),
     ent && isFinEnt(ent.id) ? [
       h("div", { class: "navgroup" }, h("span", { class: "label" }, "Finanzas"),
-        h("a", { href: "#/", class: "entswitch", title: "Volver a elegir" }, h("b", null, ent.id === "personal" ? "Mis finanzas" : ent.name), h("span", null, state.entities.length > 1 ? "Cambiar de espacio" : "Tu espacio")),
+        h("a", { href: "#/", class: "entswitch", title: "Volver a elegir" }, h("b", null, ent.id === "personal" && state.owner ? "Mis finanzas" : ent.name), h("span", null, state.entities.length > 1 ? "Cambiar de espacio" : "Tu espacio")),
         PTABS.map(([k, l]) => a(`${PB()}/${k}`, `personal-${k}`, l)))
     ] : ent ? [
       h("div", { class: "navgroup" }, h("span", { class: "label" }, "Empresa"),
@@ -142,10 +148,10 @@ function shell(content, active) {
         h("a", { href: "#/nuevo-negocio", class: "add only-admin" }, "+ Agregar negocio"),
         a("#/plataformas", "plataformas", "Plataformas"))
     ] : [
-      h("div", { class: "navgroup" }, a("#/", "inicio", "Elegir empresa"))
+      h("div", { class: "navgroup" }, a("#/", "inicio", state.spaceOnly ? "Tus perfiles" : "Elegir empresa"))
     ],
     state.spaceOnly ? "" : h("div", { class: "navgroup" }, a("#/ajustes", "ajustes", "Accesos y ajustes")),
-    h("div", { class: "who" }, h("b", null, state.user.name || "Mi cuenta"), h("span", null, state.user.email), h("span", null, state.spaceOnly ? "Administra su espacio" : ROLE_LABEL[state.user.role] || ""),
+    h("div", { class: "who" }, h("b", null, state.user.name || "Mi cuenta"), h("span", null, state.user.email), h("span", null, state.spaceOnly ? "Acceso a perfiles de finanzas" : ROLE_LABEL[state.user.role] || ""),
       h("button", { type: "button", onclick: async () => { await api("/auth/logout", { method: "POST" }); state.user = null; renderLogin(); } }, "Cerrar sesión")));
   nav.addEventListener("click", (e) => { if (e.target.tagName === "A") nav.classList.remove("open"); });
   const top = h("div", { class: "topbar" }, h("span", { class: "row", style: "gap:8px" }, logo("light", 22), h("b", null, "Starkum")), h("button", { type: "button", "aria-controls": "side", onclick: () => nav.classList.toggle("open") }, "Menú"));
@@ -303,9 +309,9 @@ async function pageHome() {
   const { entities } = await api("/entities");
   state.entities = entities.map((e) => ({ ...e, ...(state.entities.find((x) => x.id === e.id) || {}), details: e.details }));
   // Quien solo tiene un espacio entra directo a él
-  if (entities.length === 1 && isFinEnt(entities[0].id)) { location.replace(entities[0].id === "personal" ? "#/personal" : "#/finanzas/" + spaceOf(entities[0].id)); return; }
+
   const page = h("div", { class: "page chooser" },
-    h("div", { class: "chooserhead" }, logo("auto", 72), h("h1", null, state.spaceOnly ? "¿Qué espacio quieres abrir?" : "¿En qué empresa vas a trabajar?")),
+    h("div", { class: "chooserhead" }, logo("auto", 72), h("h1", null, state.spaceOnly ? "Tus perfiles" : "¿En qué empresa vas a trabajar?")),
     h("div", { class: "entpick" + (entities.length > 2 ? " three" : "") }, entities.map((e) => h("div", { class: "entwrap" }, h("a", { class: "entcard", href: e.id === "personal" ? "#/personal" : e.kind === "space" ? "#/finanzas/" + spaceOf(e.id) : "#/empresa/" + e.id },
       entityLogo(e, 96), h("span", { class: "stack", style: "gap:4px;align-items:center;text-align:center" }, h("b", { style: "font-size:22px" }, e.name), h("span", { class: "muted" }, e.country))),
       entityWeb(e)))));
@@ -840,7 +846,7 @@ async function cardsView(entityId) {
     return h("div", { class: "stack", style: "gap:6px" },
       h("b", { class: "small" }, debit ? "Extractos bancarios" : "Estados de cuenta y pagos"),
       !debit && next ? h("p", { class: "small", style: "margin:0" }, "Próximo pago: ", h("b", null, fdate(next.due_date)), ` (cierre ${fdate(next.closing_date)}). Mejor día para comprar: el día después del cierre.`) : "",
-      debit ? h("p", { class: "small muted", style: "margin:0" }, "Es de débito: no hay pagos que recordar. El extracto de la cuenta es el mismo archivo que está en Documentos › Bancarios: súbelo en cualquiera de los dos lados y queda en ambos.") : "",
+      debit ? h("p", { class: "small muted", style: "margin:0" }, isFinEnt(entityId) ? "Es de débito: no hay pagos que recordar. Guarda aquí el extracto de cada mes." : "Es de débito: no hay pagos que recordar. El extracto de la cuenta es el mismo archivo que está en Documentos › Bancarios: súbelo en cualquiera de los dos lados y queda en ambos.") : "",
       rows.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:520px" }, h("thead", null, h("tr", null, (debit ? ["Corte", "Extracto", ""] : ["Cierre", "Pago", "Estado", "Estado de cuenta", ""]).map((t) => h("th", null, t)))),
         h("tbody", null, rows.map((x) => h("tr", null, h("td", { class: "mono" }, fdate(x.closing_date)),
           debit ? "" : h("td", { class: "mono" }, fdate(x.due_date)),
@@ -867,7 +873,7 @@ async function cardsView(entityId) {
   const entName = (id) => (state.entities.find((e) => e.id === id) || {}).name;
   return h("div", { class: "stack", style: "gap:14px" },
     isFinEnt(entityId) && cards.length ? balancesTable(cards) : "",
-    h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, "Cada factura se asocia a la tarjeta con que pagaste. Se guardan solo el banco, la red, el tipo, el titular, los últimos 4 dígitos y el vencimiento: nunca el número completo, el código de seguridad ni la foto."),
+    h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, (isFinEnt(entityId) ? "Tus cuentas y tarjetas. " : "Cada factura se asocia a la tarjeta con que pagaste. ") + "Se guardan solo el banco, la red, el tipo, el titular, los últimos 4 dígitos y el vencimiento: nunca el número completo, el código de seguridad ni la foto."),
       h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => cardDialog(null, entityId) }, "+ Agregar tarjeta")),
     cards.length ? h("div", { class: "stack", style: "gap:22px" }, byBank(cards).map(([bank, list]) => h("div", { class: "stack", style: "gap:12px" },
       h("h2", { style: "margin:0" }, bank, h("span", { class: "small muted", style: "font-weight:400" }, ` · ${list.length} ${list.length === 1 ? "cuenta o tarjeta" : "cuentas o tarjetas"}`)),
@@ -1254,13 +1260,15 @@ async function pagePersonal(tab, q, sid = "personal") {
   if (!state.entities.some((e) => e.id === entId)) return pageNotFound();
   state.space = sid;
   setEntity(entId);
+  state.readOnly = (state.entities.find((e) => e.id === entId) || {}).level === "viewer";
+  document.body.dataset.role = state.readOnly ? "viewer" : state.spaceOnly ? "admin" : state.user.role;
   const act = "personal-" + tab;
   shell(loading(), act);
   const ent = state.entities.find((e) => e.id === entId) || { id: entId, name: "Personal", details: {} };
   const pp = await api("/personal/people").catch(() => ({ people: [], self: "personal" }));
   state.people = pp.people; state.self = pp.self || "personal";
-  const title = sid === "personal" ? "Mis finanzas" : ent.name;
-  const eyebrow = sid === "personal" ? "Personal · solo tú lo ves" : state.spaceOnly ? "Tu espacio de finanzas" : "Perfil de finanzas · lo ven tú y quien autorices";
+  const title = sid === "personal" && state.owner ? "Mis finanzas" : ent.name;
+  const eyebrow = state.readOnly ? "Solo puedes ver este perfil" : sid === "personal" ? (state.owner ? "Personal · solo tú lo ves" : "Perfil de finanzas") : state.spaceOnly ? "Tu espacio de finanzas" : "Perfil de finanzas · lo ven tú y quien autorices";
   const head = [h("div", { class: "head" }, h("div", { class: "row", style: "gap:14px;align-items:center;flex-wrap:nowrap" }, entityLogo(ent, 56), h("div", null, h("span", { class: "eyebrow" }, eyebrow), h("h1", null, title)))),
     h("div", { class: "tabs", role: "tablist" }, PTABS.map(([k, l]) => h("a", { href: `${PB()}/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
   const month = /^\d{4}-\d{2}$/.test(q.get("mes") || "") ? q.get("mes") : new Date().toISOString().slice(0, 7);
@@ -1274,6 +1282,7 @@ async function pagePersonal(tab, q, sid = "personal") {
     content = tab === "movimientos" ? personalMoves(d, month, year) : personalSummary(d, month, year);
   }
   shell(h("div", { class: "page" }, ...head, content), act);
+  lockReadOnly(document.getElementById("main"));
 }
 function catBars(list, usd) {
   const max = Math.max(1, ...list.map((c) => c.total));
@@ -1375,7 +1384,7 @@ function movesTable(items, cats, people) {
 function personalMoves(d, month, year) {
   let cat = "", text = "", who = "", acct = new URLSearchParams(location.hash.split("?")[1] || "").get("cuenta") || "";
   const box = h("div");
-  const draw = () => box.replaceChildren(movesTable(d.items.filter((x) => (!cat || x.category === cat) && (!acct || x.card_id === acct) && (!who || x.owner === who) && (!text || x.desc.toLowerCase().includes(text))), d.categories, d.people));
+  const draw = () => { box.replaceChildren(movesTable(d.items.filter((x) => (!cat || x.category === cat) && (!acct || x.card_id === acct) && (!who || x.owner === who) && (!text || x.desc.toLowerCase().includes(text))), d.categories, d.people)); lockReadOnly(box); };
   draw();
   return h("div", { class: "stack", style: "gap:16px" },
     h("div", { class: "row between" }, monthNav(PB() + "/movimientos", month, year), h("div", { class: "row only-admin", style: "gap:8px" },
@@ -1601,30 +1610,31 @@ async function subsView(ent, biz, q) {
   const stat = (l, v) => h("div", { class: "card stat" }, h("span", { class: "small muted" }, l), h("br"), h("b", null, v));
   const base = biz ? `#/negocio/${biz.id}/suscripciones` : `#/empresa/${ent.id}/suscripciones`;
   const usedPlats = platforms.filter((p) => subs.some((s) => s.platform_ids.includes(p.id)));
-  const filt = biz || !subs.length ? "" : h("div", { class: "chips", role: "tablist", "aria-label": "Plataforma" },
+  const P = isFinEnt(ent.id); // finanzas personales: sin plataformas, sin facturas de negocio, sin contador
+  const filt = P || biz || !subs.length ? "" : h("div", { class: "chips", role: "tablist", "aria-label": "Plataforma" },
     [["", "Todas"], ...usedPlats.map((p) => [p.id, p.name]), ...(subs.some((s) => !s.platform_ids.length) ? [["general", "General de la empresa"]] : [])].map(([k, l]) => h("a", { href: base + (k ? "?p=" + k : ""), class: "pill" + (plat === k ? " ok" : ""), role: "tab", "aria-selected": String(plat === k), style: "text-decoration:none" }, l)));
   const pend = shown.filter((s) => s.pending && s.active).length;
   const row = (s) => h("tr", { style: s.active ? "" : "opacity:.55" },
     h("td", null, s.url ? h("a", { href: s.url, target: "_blank", rel: "noopener", style: "font-weight:700" }, s.name) : h("b", null, s.name), s.notes ? h("div", { class: "small muted", style: "max-width:320px" }, s.notes) : ""),
-    h("td", null, h("span", { class: "chips" }, s.platforms.length ? s.platforms.map((n) => pill(n, "info")) : pill("General"))),
+    P ? "" : h("td", null, h("span", { class: "chips" }, s.platforms.length ? s.platforms.map((n) => pill(n, "info")) : pill("General"))),
     h("td", { class: "mono" }, s.cycle === "gratis" ? pill("Gratis", "ok") : s.amount > 0 ? money(s.amount, s.currency) : "—"), h("td", null, s.pending || s.cycle === "gratis" ? "—" : CYCLE[s.cycle]),
     h("td", { class: "mono" }, !s.active ? h("span", { class: "small muted" }, "Cancelada " + fdate(s.ended_on)) : s.pending ? pill("Por completar", "warn") : s.cycle === "gratis" ? "—" : fdate(s.next_charge)),
     h("td", { class: "small" }, s.card ? `${s.card} •••• ${s.last4}` : "—"),
-    h("td", { class: "small" }, h("span", { class: "stack", style: "gap:2px" },
+    P ? "" : h("td", { class: "small" }, h("span", { class: "stack", style: "gap:2px" },
       s.invoices.length ? h("a", { href: "#/factura/" + s.invoices[0].id, style: "font-weight:700" }, `${s.invoices.length} factura${s.invoices.length === 1 ? "" : "s"}`) : h("span", { class: "muted" }, "Sin facturas"),
       s.invoices.length ? h("span", { class: "muted" }, `Última: ${fdate(s.invoices[0].issue_date || s.invoices[0].created_at)}${s.invoices[0].total ? " · " + money(s.invoices[0].total, s.invoices[0].currency) : ""}`) : "",
       s.cycle !== "gratis" ? h("button", { class: "linkbtn small only-upload", type: "button", style: "padding:0;text-align:left", onclick: () => subInvoice(s, ent, platforms) }, "+ Subir factura") : "")),
     h("td", { class: "only-admin" }, h("button", { class: "linkbtn small", type: "button", onclick: () => subDialog(s, ent, cards, platforms) }, s.pending ? "Completar" : "Editar")));
   return h("div", { class: "stack", style: "gap:16px" },
-    h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, biz ? `Las herramientas que usas en ${biz.name}. Si una también la usas en otra plataforma, es el mismo registro: se cobra una sola vez.` : "Cada herramienta es un solo registro aunque la uses en varias plataformas, así el cobro no se duplica. Cada cobro sale en el paquete del contador y se compara con el estado de cuenta."),
-      h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => subDialog(null, ent, cards, platforms, plat && plat !== "general" ? plat : biz ? platforms.filter((p) => p.business_id === biz.id).map((p) => p.id)[0] : "") }, "+ Agregar herramienta")),
+    h("div", { class: "row between" }, h("p", { class: "small muted", style: "margin:0;max-width:660px" }, P ? "Tus suscripciones personales (streaming, celular, gimnasio…). Cada cobro cuenta en tus gastos del mes; deja el valor vacío si todavía no la pagas." : biz ? `Las herramientas que usas en ${biz.name}. Si una también la usas en otra plataforma, es el mismo registro: se cobra una sola vez.` : "Cada herramienta es un solo registro aunque la uses en varias plataformas, así el cobro no se duplica. Cada cobro sale en el paquete del contador y se compara con el estado de cuenta."),
+      h("button", { class: "btn primary sm only-admin", type: "button", onclick: () => subDialog(null, ent, cards, platforms, plat && plat !== "general" ? plat : biz ? platforms.filter((p) => p.business_id === biz.id).map((p) => p.id)[0] : "") }, P ? "+ Agregar suscripción" : "+ Agregar herramienta")),
     filt,
     h("div", { class: "grid g4" }, stat("Con cobro activo", act.length), ...curs.flatMap((c) => [stat("Al mes" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.m || 0, c)), stat("Al año" + (curs.length > 1 ? " · " + c : ""), money(per[c]?.y || 0, c))]), stat("Por completar", pend)),
     shown.length ? h("section", { class: "card stack" },
-      h("div", { class: "tablewrap" }, h("table", { style: "min-width:860px" }, h("thead", null, h("tr", null, ["Herramienta", "Plataformas", "Valor", "Tipo", "Próximo cobro", "Tarjeta", "Facturas", ""].map((c) => h("th", null, c)))), h("tbody", null, shown.map(row)))),
+      h("div", { class: "tablewrap" }, h("table", { style: "min-width:860px" }, h("thead", null, h("tr", null, (P ? ["Suscripción", "Valor", "Tipo", "Próximo cobro", "Tarjeta", ""] : ["Herramienta", "Plataformas", "Valor", "Tipo", "Próximo cobro", "Tarjeta", "Facturas", ""]).map((c) => h("th", null, c)))), h("tbody", null, shown.map(row)))),
       pend ? h("p", { class: "small muted", style: "margin:0" }, "Las que dicen \"Por completar\" todavía no cuentan como gasto. Cuando empieces a pagarlas, agrega el valor, el tipo, la fecha de cobro y la tarjeta.") : "")
-      : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay herramientas aquí.")),
-    ent.id === "personal" ? "" : h("section", { class: "card stack" }, h("h2", null, "¿Cuentan como gasto de la empresa?"),
+      : h("section", { class: "card" }, h("p", { class: "empty" }, P ? "Todavía no hay suscripciones." : "Todavía no hay herramientas aquí.")),
+    P ? "" : h("section", { class: "card stack" }, h("h2", null, "¿Cuentan como gasto de la empresa?"),
       h("p", { class: "small", style: "margin:0" }, ent.id === "sas"
         ? "Sí, si la herramienta se usa para el negocio. En Colombia el gasto necesita soporte: la factura electrónica del proveedor o, si es del exterior, el documento soporte. Guarda la factura de cada cobro y confirma con el contador el IVA y la retención de servicios del exterior."
         : "Sí, si la herramienta se usa para el negocio: en la LLC (Schedule C) son gastos deducibles y bajan la utilidad sobre la que pagas impuestos. Si también la usas para algo personal, solo cuenta la parte del negocio: márcala como \"Mixto\" y el contador decide el porcentaje."),
@@ -1639,29 +1649,30 @@ function subInvoice(s, ent, platforms) {
 }
 function subDialog(s, ent, cards, platforms, platDefault) {
   const sel = new Set(s ? s.platform_ids : platDefault ? [platDefault] : []);
-  modal(s ? s.name : "Agregar herramienta", () => h("div", { class: "stack" },
+  const P = isFinEnt(ent.id);
+  modal(s ? s.name : P ? "Agregar suscripción" : "Agregar herramienta", () => h("div", { class: "stack" },
     h("div", { class: "fgrid" },
-      fld("Herramienta", h("input", { name: "name", required: true, value: s?.name || "", placeholder: "Por ejemplo: Keepa" })),
+      fld(P ? "Suscripción" : "Herramienta", h("input", { name: "name", required: true, value: s?.name || "", placeholder: P ? "Por ejemplo: Netflix" : "Por ejemplo: Keepa" })),
       fld("Enlace (opcional)", h("input", { name: "url", value: s?.url || "", placeholder: "https://…", inputmode: "url" }))),
-    ent.id === "personal" ? "" : h("fieldset", null, h("legend", null, "Plataformas donde la usas"),
+    P ? "" : h("fieldset", null, h("legend", null, "Plataformas donde la usas"),
       h("div", { class: "row", style: "gap:6px 16px;flex-wrap:wrap" }, platforms.map((p) => h("label", { class: "row", style: "gap:6px" }, h("input", { type: "checkbox", name: "plat", value: p.id, checked: sel.has(p.id), style: "width:auto" }), h("span", { class: "small" }, p.name, p.status === "sin_cuenta" ? h("span", { class: "muted" }, " (sin cuenta)") : "")))),
       h("p", { class: "small muted", style: "margin:4px 0 0" }, "Marca todas las que apliquen. Es un solo registro: el cobro cuenta una vez. Sin marcar ninguna queda como general de la empresa.")),
     h("p", { class: "small muted", style: "margin:0" }, "Datos del cobro: déjalos vacíos si todavía no la pagas. Si no tiene costo, elige el tipo \"Gratis\"."),
     h("div", { class: "fgrid" },
       fld("Valor", h("input", { name: "amount", type: "number", step: "0.01", min: "0", inputmode: "decimal", value: s?.amount > 0 ? s.amount : "" })),
-      fld("Moneda", h("select", { name: "currency" }, (ent.id === "sas" ? ["COP", "USD"] : ["USD", "COP"]).map((c) => h("option", { selected: s?.currency === c }, c)))),
+      fld("Moneda", h("select", { name: "currency" }, (ent.id === "sas" ? ["COP", "USD"] : P ? ["USD", "VES", "COP"] : ["USD", "COP"]).map((c) => h("option", { selected: s?.currency === c }, c)))),
       fld("Tipo", h("select", { name: "cycle" }, Object.entries(CYCLE).map(([k, l]) => h("option", { value: k, selected: (s?.cycle || "mensual") === k }, l)))),
       fld("Fecha de cobro o renovación", h("input", { name: "charge_date", type: "date", value: s?.charge_date || "" }))),
     h("div", { class: "fgrid" },
       fld("Tarjeta con que se paga", h("select", { name: "card_id" }, h("option", { value: "" }, "—"), cards.map((c) => h("option", { value: c.id, selected: s?.card_id === c.id }, cardText(c))))),
-      fld("Uso", h("select", { name: "use_kind" }, [["empresa", "Solo de la empresa"], ["mixto", "Mixto (empresa y personal)"]].map(([k, l]) => h("option", { value: k, selected: (s?.use_kind || "empresa") === k }, l)))),
+      P ? "" : fld("Uso", h("select", { name: "use_kind" }, [["empresa", "Solo de la empresa"], ["mixto", "Mixto (empresa y personal)"]].map(([k, l]) => h("option", { value: k, selected: (s?.use_kind || "empresa") === k }, l)))),
       fld("Cancelada desde (si ya no la pagas)", h("input", { name: "ended_on", type: "date", value: s?.ended_on || "" }))),
     fld("Notas", h("input", { name: "notes", value: s?.notes || "" })),
     s && isAdmin() ? h("button", { class: "btn danger sm", type: "button", style: "align-self:flex-start", onclick: () => confirmDelete("Eliminar herramienta", `Se borra ${s.name} de todas las plataformas y deja de salir en el paquete del contador. Si solo la cancelaste, mejor pon la fecha en "Cancelada desde" para conservar los cobros pasados.`, async () => { await api("/subs/" + s.id, { method: "DELETE" }); toast("Herramienta eliminada."); route(); }) }, "Eliminar") : ""),
   async (fd) => {
     const body = { ...Object.fromEntries(fd), platform_ids: fd.getAll("plat"), entity_id: ent.id }; delete body.plat;
     if (body.cycle !== "gratis" && ((body.amount && !body.charge_date) || (!body.amount && body.charge_date))) throw new Error("Para que cuente el cobro, completa el valor y la fecha juntos (o deja los dos vacíos).");
-    await api(s ? "/subs/" + s.id : "/subs", { method: s ? "PUT" : "POST", body }); toast(s ? "Guardado." : "Herramienta agregada."); route();
+    await api(s ? "/subs/" + s.id : "/subs", { method: s ? "PUT" : "POST", body }); toast(s ? "Guardado." : P ? "Suscripción agregada." : "Herramienta agregada."); route();
   });
 }
 // ---------- lectura de archivos: CSV, Excel y PDF ----------
@@ -2324,30 +2335,30 @@ async function pageSearch(qs) {
 }
 
 // Dar o cambiar acceso: se marca a qué puede entrar (empresas con su rol y cada perfil de finanzas)
+// Dar o cambiar acceso: por cada perfil (empresas y finanzas) se elige si entra y qué puede hacer ahí
 function accessDialog(u, spaces) {
-  const acc = u?.access || { companies: true, spaces: [] };
-  modal(u ? "Cambiar acceso de " + u.email : "Dar acceso", () => {
-    const comp = h("input", { type: "checkbox", name: "companies", checked: acc.companies, style: "width:auto", disabled: !state.owner });
-    const role = h("select", { name: "role" }, ["standard", "viewer", "admin"].map((r) => h("option", { value: r, selected: (u?.role === "member" ? "standard" : u?.role || "standard") === r }, ROLE_LABEL[r])));
-    const roleBox = fld("Rol en las empresas", role);
-    const sync = () => { roleBox.style.display = comp.checked ? "" : "none"; };
-    comp.onchange = sync; setTimeout(sync);
-    return h("div", { class: "stack" },
-      u ? h("input", { type: "hidden", name: "email", value: u.email }) : fld("Correo", h("input", { name: "email", type: "email", required: true })),
-      fld("Nombre", h("input", { name: "name", value: u?.name || "" })),
-      h("fieldset", { class: "stack", style: "gap:8px" }, h("legend", null, "¿A qué le das acceso?"),
-        h("label", { class: "row", style: "gap:10px;align-items:flex-start;flex-wrap:nowrap;cursor:pointer" }, comp, h("span", { style: "flex:1;min-width:0" }, h("b", null, "Empresas"), h("br"), h("span", { class: "small muted" }, "Starkum Holdings LLC y Starkum Group SAS, con el rol que elijas abajo."))),
-        roleBox,
-        ...spaces.map((x) => h("label", { class: "row", style: "gap:10px;align-items:flex-start;flex-wrap:nowrap;cursor:pointer" }, h("input", { type: "checkbox", name: "space", value: x.id, checked: acc.spaces.includes(x.id), style: "width:auto", disabled: !state.owner }),
-          h("span", { style: "flex:1;min-width:0" }, h("b", null, x.name), h("br"), h("span", { class: "small muted" }, "Lo administra: ve y cambia todo dentro de ese perfil. No ve nada más.")))),
-        !state.owner ? h("p", { class: "small muted", style: "margin:0" }, "Solo el dueño puede autorizar perfiles de finanzas.") : "",
-        h("p", { class: "small muted", style: "margin:0" }, "\"Mis finanzas\" y el acceso total quedan solo para " + "el dueño.")),
-      h("ul", { class: "small muted", style: "margin:0;padding-left:18px" }, ["admin", "standard", "viewer"].map((r) => h("li", null, h("b", null, ROLE_LABEL[r] + ": "), ROLE_HELP[r] + " (en las empresas)"))));
-  }, async (fd) => {
-    const companies = fd.get("companies") === "on"; const sps = fd.getAll("space");
-    if (!companies && !sps.length) throw new Error("Marca al menos una cosa a la que tendrá acceso.");
-    await api("/users", { method: "POST", body: { email: fd.get("email"), name: fd.get("name"), role: companies ? fd.get("role") : "admin", access: state.owner ? { companies, spaces: sps } : undefined } });
-    toast(u ? "Acceso actualizado." : "Acceso dado. Ya puede entrar con su correo."); route();
+  const acc = u?.access || { companies: true, levels: {} };
+  const lv = acc.levels || {};
+  const COMP = [["", "Sin acceso"], ["viewer", "Solo consulta: ve y descarga"], ["standard", "Estándar: sube facturas y documentos"], ["admin", "Administrador: edita, elimina y da accesos"]];
+  const FIN = [["", "Sin acceso"], ["viewer", "Solo ver"], ["admin", "Administra: cambia todo en ese perfil"]];
+  const rowSel = (name, opts, val, title, help) => h("div", { class: "row between", style: "gap:10px;padding:8px 0;border-bottom:1px solid var(--line);flex-wrap:wrap" },
+    h("span", { class: "stack", style: "gap:0;flex:1;min-width:200px" }, h("b", null, title), h("span", { class: "small muted" }, help)),
+    h("select", { name, style: "width:auto;max-width:300px", disabled: !state.owner && name !== "companies" }, opts.map(([k, l]) => h("option", { value: k, selected: (val || "") === k }, l))));
+  const compVal = u ? (acc.companies ? (u.role === "member" ? "standard" : u.role) : "") : "standard";
+  modal(u ? "Cambiar acceso de " + u.email : "Dar acceso", () => h("div", { class: "stack" },
+    u ? h("input", { type: "hidden", name: "email", value: u.email }) : fld("Correo", h("input", { name: "email", type: "email", required: true })),
+    fld("Nombre", h("input", { name: "name", value: u?.name || "" })),
+    h("fieldset", { class: "stack", style: "gap:0" }, h("legend", null, "Perfiles: a cuáles entra y qué puede hacer"),
+      rowSel("companies", COMP, compVal, "Empresas Starkum", "Starkum Holdings LLC y Starkum Group SAS, con sus negocios y plataformas."),
+      rowSel("lv:personal", [["", "Sin acceso"], ["viewer", "Solo ver"]], lv.personal, "Mis finanzas", "Tus finanzas personales. Solo tú puedes cambiarlas."),
+      ...spaces.map((x) => rowSel("lv:" + x.id, FIN, lv[x.id], x.name, "Finanzas personales: cuentas, movimientos y suscripciones de ese perfil.")),
+      h("p", { class: "small muted", style: "margin:8px 0 0" }, state.owner ? "Solo ve los perfiles que le marques; los demás no le aparecen. El acceso total a todo es solo tuyo." : "Solo el dueño puede autorizar perfiles de finanzas."))),
+  async (fd) => {
+    const comp = fd.get("companies") || "";
+    const levels = {}; for (const [k, v] of fd.entries()) if (k.startsWith("lv:") && v) levels[k.slice(3)] = v;
+    if (!comp && !Object.keys(levels).length) throw new Error("Elige al menos un perfil al que tendrá acceso.");
+    await api("/users", { method: "POST", body: { email: fd.get("email"), name: fd.get("name"), role: comp || "viewer", access: state.owner ? { companies: !!comp, levels } : undefined } });
+    toast(u ? "Acceso actualizado. Si tenía la sesión abierta, vuelve a entrar con los nuevos permisos." : "Acceso dado. Ya puede entrar con su correo."); route();
   }, u ? "Guardar" : "Dar acceso");
 }
 // Perfiles de finanzas: crear uno y elegir qué cuentas de Mis finanzas se comparten en él
@@ -2378,7 +2389,8 @@ async function pageSettings() {
     h("div", { class: "grid g2" },
       h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Quién puede entrar"), admin ? h("button", { class: "btn sm", type: "button", onclick: () => accessDialog(null, spaces) }, "+ Dar acceso") : ""),
         h("div", { class: "list" }, users.filter((u) => u.active).map((u) => { const isOwnerRow = u.email === state.user.email && state.owner;
-          const summary = isOwnerRow ? "Dueño · acceso total a empresas y a todos los perfiles" : [u.access.companies ? "Empresas: " + (ROLE_LABEL[u.role === "member" ? "standard" : u.role] || "") : "", ...u.access.spaces.map((sid) => "Administra " + ((spaces.find((x) => x.id === sid) || {}).name || sid))].filter(Boolean).join(" · ");
+          const LV = { admin: "administra", viewer: "solo ve" }; const lvs = u.access.levels || {};
+          const summary = isOwnerRow ? "Dueño · acceso total a empresas y a todos los perfiles" : [u.access.companies ? "Empresas: " + (ROLE_LABEL[u.role === "member" ? "standard" : u.role] || "") : "", ...Object.entries(lvs).map(([sid, l]) => (sid === "personal" ? "Mis finanzas" : (spaces.find((x) => x.id === sid) || {}).name || sid) + ": " + LV[l])].filter(Boolean).join(" · ");
           return h("div", null, h("span", { class: "stack", style: "gap:0" }, h("b", null, u.email), h("span", { class: "small muted" }, [u.name, summary].filter(Boolean).join(" · "))),
             h("span", { class: "row", style: "gap:10px" },
               admin && u.email !== state.user.email && (state.owner || u.access.companies) ? h("button", { class: "linkbtn small", type: "button", onclick: () => accessDialog(u, spaces) }, "Cambiar acceso") : "",

@@ -293,6 +293,7 @@ async function linkStatement(env, docId, cardId, closing) {
 async function statementDocFor(env, cycleId) {
   const c = await env.DB.prepare("SELECT cc.*, cd.entity_id, cd.issuer, cd.card_type, cd.nickname FROM card_cycles cc JOIN cards cd ON cd.id = cc.card_id WHERE cc.id = ?").bind(cycleId).first();
   if (!c || !c.file_id || c.card_type !== "debito") return;
+  if (c.entity_id === "personal" || String(c.entity_id || "").startsWith("sp:")) return; // finanzas personales: no van a los documentos de la empresa
   if (await env.DB.prepare("SELECT id FROM company_docs WHERE file_id = ?").bind(c.file_id).first()) return;
   const ent = c.entity_id || "llc";
   const [y, mo] = c.closing_date.split("-");
@@ -501,8 +502,15 @@ const ROLES = ["admin", "standard", "viewer"];
 const normRole = (r) => (r === "member" ? "standard" : ROLES.includes(r) ? r : "standard");
 // Qué puede ver cada usuario: las empresas (con su rol) y los perfiles de finanzas que se le autoricen.
 // Sin dato = acceso a empresas como antes. Los perfiles de finanzas solo los ve el dueño (ADMIN_EMAIL) o a quien él autorice.
+// levels: { <perfil>: "admin" | "viewer" } — qué puede hacer en cada perfil de finanzas ("personal" = Mis finanzas)
 function parseAccess(v) {
-  try { const a = v ? JSON.parse(v) : {}; return { companies: a.companies !== false, spaces: Array.isArray(a.spaces) ? a.spaces.map(String) : [] }; } catch { return { companies: true, spaces: [] }; }
+  try {
+    const a = v ? JSON.parse(v) : {};
+    const levels = {};
+    if (a.levels && typeof a.levels === "object") for (const [k, l] of Object.entries(a.levels)) { if (l === "admin" || l === "viewer") levels[String(k)] = l; }
+    else if (Array.isArray(a.spaces)) for (const k of a.spaces) levels[String(k)] = "admin";
+    return { companies: a.companies !== false, spaces: Object.keys(levels), levels };
+  } catch { return { companies: true, spaces: [], levels: {} }; }
 }
 const ownerEmail = (env) => String(env.ADMIN_EMAIL || "contact@starkumholdings.com").toLowerCase();
 const spaceEnt = (sid) => (sid === "personal" ? "personal" : "sp:" + sid);
@@ -996,9 +1004,12 @@ async function api(req, env, url, user) {
   const spaceOnly = !isOwner && !acc.companies;
   const isAdmin = user.role === "admin" && !spaceOnly;
   const canSpace = (sid) => !!sid && (isOwner || acc.spaces.includes(sid));
+  // En cada perfil: "admin" cambia todo, "viewer" solo mira
+  const canWriteSpace = (sid) => !!sid && (isOwner || (acc.levels || {})[sid] === "admin");
+  const writing = m !== "GET";
   const entSpace = (e) => (e === "personal" ? "personal" : String(e || "").startsWith("sp:") ? String(e).slice(3) : null);
   // Empresas: según el acceso a empresas. Perfiles de finanzas: el dueño o quien tenga ese perfil autorizado.
-  const entOk = (e) => (["llc", "sas"].includes(e) && !spaceOnly) || (entSpace(e) ? canSpace(entSpace(e)) : false);
+  const entOk = (e) => (["llc", "sas"].includes(e) && !spaceOnly) || (entSpace(e) ? (writing ? canWriteSpace : canSpace)(entSpace(e)) : false);
   const qEnt = url.searchParams.get("entity");
   if (qEnt && entSpace(qEnt) && !canSpace(entSpace(qEnt))) return fail("No encontrado.", 404);
   const qSpace = url.searchParams.get("space");
@@ -1007,7 +1018,7 @@ async function api(req, env, url, user) {
   if (spaceOnly) {
     const allowed = p === "/me" || p === "/auth/logout" || p === "/entities" || p === "/businesses" || p === "/platforms" || p.startsWith("/personal/") || (p === "/spaces" && m === "GET") || p === "/fx/ves"
       || (p === "/bank/read" && m === "POST") || (p === "/bank/lines" && m === "POST")
-      || (p === "/cards" && (m === "GET" || m === "POST")) || (/^\/cards\/[\w-]+$/.test(p) && m === "PUT")
+      || (p === "/cards" && (m === "GET" || m === "POST")) || (/^\/cards\/[\w-]+$/.test(p) && m === "PUT") || (/^\/cards\/cycles\/[\w-]+\/file$/.test(p) && m === "POST")
       || (p === "/moves" && m === "POST") || (/^\/moves\/[\w-]+$/.test(p) && m === "DELETE") || (/^\/bank\/lines\/[\w-]+$/.test(p) && m === "PUT")
       || (p === "/subs" && m !== "DELETE") || (/^\/subs\/[\w-]+$/.test(p) && (m === "PUT" || m === "DELETE"));
     if (!allowed) return fail("No encontrado.", 404);
@@ -1020,18 +1031,23 @@ async function api(req, env, url, user) {
   const sharedRoute = p.startsWith("/personal/") || /^\/(cards|moves|subs|bank\/lines)(\/|$)/.test(p);
   if (companyDenied && !sharedRoute) return fail(companyDenied, 403);
   // Para registros que pueden ser de una empresa o de un perfil: valida según a quién pertenecen
-  const recOk = (ent) => (entSpace(ent) ? canSpace(entSpace(ent)) : !companyDenied && (!spaceOnly));
+  const recOk = (ent) => (entSpace(ent) ? (writing ? canWriteSpace : canSpace)(entSpace(ent)) : !companyDenied && (!spaceOnly));
   const mySpaceIds = isOwner ? null : acc.spaces;
+  // ¿La cuenta está compartida en un perfil al que tiene acceso? (para cambiar algo, en uno que administre)
   const cardInMySpaces = async (cardId) => {
-    if (isOwner) return true; if (!cardId || !acc.spaces.length) return false;
-    return !!(await env.DB.prepare(`SELECT 1 FROM space_cards WHERE card_id = ? AND space_id IN (${acc.spaces.map(() => "?").join(",")}) LIMIT 1`).bind(cardId, ...acc.spaces).first());
+    if (isOwner) return true;
+    const ids = acc.spaces.filter((x) => x !== "personal" && (!writing || acc.levels[x] === "admin"));
+    if (cardId && (writing ? canWriteSpace("personal") : canSpace("personal"))) { const c = await env.DB.prepare("SELECT 1 FROM cards WHERE id = ? AND (entity_id = 'personal' OR owner = 'personal')").bind(cardId).first(); if (c) return true; }
+    if (!cardId || !ids.length) return false;
+    return !!(await env.DB.prepare(`SELECT 1 FROM space_cards WHERE card_id = ? AND space_id IN (${ids.map(() => "?").join(",")}) LIMIT 1`).bind(cardId, ...ids).first());
   };
   if (p.startsWith("/personal/") && !qSpace && !isOwner && !/^\/personal\/(lines|accounts)\//.test(p)) return fail("No encontrado.", 404);
   // Rutas compartidas (tarjetas, movimientos, suscripciones, líneas del banco): se valida el registro concreto
   if (sharedRoute && !p.startsWith("/personal/") && !isOwner) {
     let id, target = null, cardId = null;
     const peek = async () => { try { return req.headers.get("content-type")?.includes("json") ? await req.clone().json() : Object.fromEntries(await req.clone().formData()); } catch { return {}; } };
-    if ((id = p.match(/^\/cards\/([\w-]+)$/)?.[1])) { const c = await env.DB.prepare("SELECT entity_id, owner FROM cards WHERE id = ?").bind(id).first(); if (!c) return fail("No encontrado.", 404); cardId = id; target = c.entity_id; }
+    if ((id = p.match(/^\/cards\/cycles\/([\w-]+)\/file$/)?.[1])) { const c = await env.DB.prepare("SELECT cd.id, cd.entity_id FROM card_cycles cc JOIN cards cd ON cd.id = cc.card_id WHERE cc.id = ?").bind(id).first(); if (!c) return fail("No encontrado.", 404); cardId = c.id; target = c.entity_id; }
+    else if ((id = p.match(/^\/cards\/([\w-]+)$/)?.[1])) { const c = await env.DB.prepare("SELECT entity_id, owner FROM cards WHERE id = ?").bind(id).first(); if (!c) return fail("No encontrado.", 404); cardId = id; target = c.entity_id; }
     else if ((id = p.match(/^\/moves\/([\w-]+)$/)?.[1])) target = (await env.DB.prepare("SELECT entity_id FROM money_moves WHERE id = ?").bind(id).first())?.entity_id;
     else if ((id = p.match(/^\/subs\/([\w-]+)$/)?.[1])) target = (await env.DB.prepare("SELECT entity_id FROM subscriptions WHERE id = ?").bind(id).first())?.entity_id;
     else if ((id = p.match(/^\/bank\/lines\/([\w-]+)$/)?.[1])) { const l = await env.DB.prepare("SELECT entity_id, card_id FROM bank_lines WHERE id = ?").bind(id).first(); target = l?.entity_id; cardId = l?.card_id; }
@@ -1110,8 +1126,8 @@ async function api(req, env, url, user) {
   if (p === "/entities") {
     await seedSpaces(env);
     const base = (await env.DB.prepare("SELECT * FROM entities ORDER BY CASE id WHEN 'llc' THEN 1 WHEN 'sas' THEN 2 ELSE 3 END").all()).results
-      .filter((e) => (e.id === "personal" ? canSpace("personal") : !spaceOnly)).map((e) => ({ ...e, details: JSON.parse(e.details || "{}") }));
-    const sps = (await listSpaces(env)).filter((x) => canSpace(x.id)).map((x) => ({ id: "sp:" + x.id, name: x.name, country: "Finanzas personales", details: {}, kind: "space", person: x.person }));
+      .filter((e) => (e.id === "personal" ? canSpace("personal") : !spaceOnly)).map((e) => ({ ...e, details: JSON.parse(e.details || "{}"), ...(e.id === "personal" ? { level: canWriteSpace("personal") ? "admin" : "viewer", ...(isOwner ? {} : { name: "Finanzas Jonth", country: "Finanzas personales" }) } : {}) }));
+    const sps = (await listSpaces(env)).filter((x) => canSpace(x.id)).map((x) => ({ id: "sp:" + x.id, name: x.name, country: "Finanzas personales", details: {}, kind: "space", person: x.person, level: canWriteSpace(x.id) ? "admin" : "viewer" }));
     return json({ entities: [...base, ...sps], folders: FOLDERS, owner: isOwner });
   }
   let mm;
@@ -1678,6 +1694,7 @@ async function api(req, env, url, user) {
   // ---------- espacio Personal (solo administrador; la guarda de arriba bloquea a los demás) ----------
   // Perfiles de finanzas: Mis finanzas solo el dueño; los demás perfiles, quien los tenga autorizados
   if (p.startsWith("/personal") && !canSpace(qSpace || "personal") && !/^\/personal\/(lines|accounts)\//.test(p)) return fail("No encontrado.", 404);
+  if (p.startsWith("/personal") && writing && !canWriteSpace(qSpace || "personal") && (qSpace || !/^\/personal\/(lines|accounts)\//.test(p))) return fail("En este perfil solo tienes permiso para ver.", 403);
   // Bancos de una empresa: saldos, entradas y salidas por cuenta (solo administrador)
   if (p === "/banks" && m === "GET") {
     if (!isAdmin) return fail("No encontrado.", 404);
@@ -1703,8 +1720,9 @@ async function api(req, env, url, user) {
   }
   // ---------- perfiles de finanzas ("personal" = Mis finanzas de Jonth; "sp:<id>" = otros perfiles) ----------
   const sid = qSpace || "personal";
-  const lineOk = async (l) => !!l && (isOwner || (entSpace(l.entity_id) && entSpace(l.entity_id) !== "personal" && canSpace(entSpace(l.entity_id))) || (l.card_id && (await cardInMySpaces(l.card_id))));
-  const cardOk = async (c) => !!c && (isOwner || (entSpace(c.entity_id) && entSpace(c.entity_id) !== "personal" && canSpace(entSpace(c.entity_id))) || (await cardInMySpaces(c.id)));
+  const spaceOk = (sid2) => (writing ? canWriteSpace : canSpace)(sid2);
+  const lineOk = async (l) => !!l && (isOwner || (entSpace(l.entity_id) && spaceOk(entSpace(l.entity_id))) || (l.card_id && (await cardInMySpaces(l.card_id))));
+  const cardOk = async (c) => !!c && (isOwner || (entSpace(c.entity_id) && spaceOk(entSpace(c.entity_id))) || (await cardInMySpaces(c.id)));
   if (p === "/personal/summary" && m === "GET") {
     await categorizePersonal(env);
     const space = await getSpace(env, sid); if (!space) return fail("No encontrado.", 404);
@@ -2382,10 +2400,13 @@ async function api(req, env, url, user) {
     // Qué puede ver: empresas (sí/no) y perfiles de finanzas. Solo el dueño autoriza perfiles o quita las empresas.
     let access = null;
     if (b.access && typeof b.access === "object") {
-      const known = (await listSpaces(env)).map((x) => x.id);
-      const a = { companies: b.access.companies !== false, spaces: (Array.isArray(b.access.spaces) ? b.access.spaces : []).map(String).filter((x) => known.includes(x)) };
-      if ((a.spaces.length || !a.companies) && !isOwner) return fail("Solo el dueño puede autorizar perfiles de finanzas.", 403);
-      if (!a.companies && !a.spaces.length) return fail("Marca al menos una cosa a la que tendrá acceso.");
+      const known = ["personal", ...(await listSpaces(env)).map((x) => x.id)];
+      const levels = {};
+      if (b.access.levels && typeof b.access.levels === "object") for (const [k, l] of Object.entries(b.access.levels)) { if (known.includes(k) && (l === "admin" || l === "viewer")) levels[k] = k === "personal" ? "viewer" : l; }
+      else for (const k of Array.isArray(b.access.spaces) ? b.access.spaces : []) if (known.includes(String(k))) levels[String(k)] = "admin";
+      const a = { companies: b.access.companies !== false, levels };
+      if ((Object.keys(levels).length || !a.companies) && !isOwner) return fail("Solo el dueño puede autorizar perfiles de finanzas.", 403);
+      if (!a.companies && !Object.keys(levels).length) return fail("Elige al menos una cosa a la que tendrá acceso.");
       if (e !== ownerEmail(env)) access = JSON.stringify(a);
     }
     const prev = await env.DB.prepare("SELECT access FROM users WHERE email = ?").bind(e).first();
