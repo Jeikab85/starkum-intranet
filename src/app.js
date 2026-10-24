@@ -1323,6 +1323,7 @@ function personalSummary(d, month, year) {
   return h("div", { class: "stack", style: "gap:18px" },
     h("div", { class: "row between" }, monthNav(base, month, year), h("div", { class: "row only-admin", style: "gap:8px" },
       h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog({ id: FENT(), name: d.space?.name || "Personal" }) }, "Leer extracto"),
+      h("button", { class: "btn sm", type: "button", onclick: () => bulkStatementsDialog({ id: FENT(), name: d.space?.name || "Personal" }) }, "Cargar estados de cuenta"),
       h("button", { class: "btn primary sm", type: "button", onclick: () => personalMoveDialog(d.categories) }, "+ Movimiento manual"))),
     !d.sfin.connected && !d.accounts.length ? h("section", { class: "card row between" }, h("span", { class: "small" }, "Conecta tus bancos para que los movimientos y saldos lleguen solos todos los días."), h("a", { class: "btn sm", href: PB() + "/conexion" }, "Conectar bancos")) : "",
     d.fx ? h("p", { class: "small muted", style: "margin:0" }, `Las cuentas en bolívares se suman en dólares con la tasa oficial del BCV: ${d.fx.rate.toLocaleString("es-US", { maximumFractionDigits: 2 })} Bs. por dólar (${fdate(d.fx.date)}).`) : "",
@@ -1390,6 +1391,7 @@ function personalMoves(d, month, year) {
   return h("div", { class: "stack", style: "gap:16px" },
     h("div", { class: "row between" }, monthNav(PB() + "/movimientos", month, year), h("div", { class: "row only-admin", style: "gap:8px" },
       h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog({ id: FENT(), name: "Personal" }) }, "Leer extracto"),
+      h("button", { class: "btn sm", type: "button", onclick: () => bulkStatementsDialog({ id: FENT(), name: "Personal" }) }, "Cargar estados de cuenta"),
       h("button", { class: "btn primary sm", type: "button", onclick: () => personalMoveDialog(d.categories) }, "+ Movimiento manual"))),
     h("div", { class: "row", style: "gap:10px;flex-wrap:wrap" }, h("input", { type: "search", placeholder: "Buscar comercio o descripción", style: "max-width:300px", oninput: (e) => { text = e.target.value.toLowerCase(); draw(); } }),
       h("select", { "aria-label": "Filtrar por categoría", style: "width:auto", onchange: (e) => { cat = e.target.value; draw(); } }, h("option", { value: "" }, "Todas las categorías"), d.categories.map((c) => h("option", null, c))),
@@ -1581,7 +1583,7 @@ async function companyBanks(ent, q) {
       h("p", { class: "small muted", style: "margin:0" }, "Los movimientos que lleguen solos pasan directo a la conciliación de \"Para el contador\". Si un movimiento ya estaba leído de un extracto, se une a él y no se duplica."));
   }
   return h("div", { class: "stack", style: "gap:18px" },
-    h("div", { class: "row between" }, monthNav(base, month, year), h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog(ent) }, "Leer extracto")),
+    h("div", { class: "row between" }, monthNav(base, month, year), h("span", { class: "row", style: "gap:8px" }, h("button", { class: "btn sm", type: "button", onclick: () => bankImportDialog(ent) }, "Leer extracto"), h("button", { class: "btn sm", type: "button", onclick: () => bulkStatementsDialog(ent) }, "Cargar estados de cuenta"))),
     h("div", { class: "grid g4", style: loans.length ? "grid-template-columns:repeat(auto-fit,minmax(170px,1fr))" : "" }, stat("Disponible en cuentas", usd(cash)), stat("Debe en tarjetas", usd(cardsOwed), cardsOwed ? "color:var(--warn)" : ""), loans.length ? stat("Debe en préstamos", usd(loansOwed), loansOwed ? "color:var(--warn)" : "") : "",
       stat("Posición neta (cuentas − deudas)", usd(cash - cardsOwed - loansOwed), cash - cardsOwed - loansOwed < 0 ? "color:var(--bad)" : ""), stat("Resultado " + label, usd(T.net), T.net < 0 ? "color:var(--bad)" : "color:var(--ok)")),
     h("div", { class: "grid g4" }, stat("Entradas " + label, usd(T.in)), stat("Salidas " + label, usd(T.out)), stat("Movimientos " + label, String(T.n)),
@@ -1782,6 +1784,7 @@ function bankFromPdf(textLines, { credit, dmy }) {
     if (!m) {
       if (/^[A-Z][A-Za-z ]{3,40}$/.test(ln) && !/balance|summary|total|page|date|amount|number|fecha|monto/i.test(ln)) sectionName = ln;
       if (/(balance summary|daily (ending )?balance|resumen de saldos|saldo diario)/i.test(ln)) { section = "skip"; continue; }
+      if (/due date|minimum|m[íi]nimo|previous balance|new balance|credit limit|available/i.test(ln)) continue;
       if (/^(customer deposits|payments?|credits?|deposits?|other additions|abonos|cr[ée]ditos|electronic deposits)/i.test(ln) || /payments and (other )?credits|deposits and (other )?(additions|credits)/i.test(ln)) section = "in";
       else if (/^(purchases?|charges?|withdrawals?|debits?|other subtractions|card transactions|checks|fees|cargos|retiros|compras)/i.test(ln) || /purchases and (other )?(charges|debits)|withdrawals and (other )?(subtractions|debits)/i.test(ln)) section = "out";
       continue;
@@ -1804,6 +1807,61 @@ function bankFromPdf(textLines, { credit, dmy }) {
     lines.push({ posted_on: d, description: desc.replace(/\d{9,}/g, (x) => "•••• " + x.slice(-4)), amount: inflow ? v : -v });
   }
   return lines;
+}
+// Fechas de un estado de cuenta (cierre, pago y saldo) sacadas del texto del PDF
+function statementMeta(tl) {
+  const D = /(\d{1,2}\/\d{1,2}\/\d{2,4}|[A-Z][a-z]{2,8}\.?\s+\d{1,2},?\s+\d{4})/g;
+  const datesIn = (t) => (t.match(D) || []).map((x) => parseAnyDate(x)).filter(Boolean);
+  const near = (re, pick) => { for (let i = 0; i < tl.length; i++) if (re.test(tl[i])) { let ds = datesIn(tl[i].split(re).slice(1).join(" ") || tl[i]); if (!ds.length) ds = datesIn(tl[i]); if (!ds.length && tl[i + 1]) ds = datesIn(tl[i + 1]); if (ds.length) return pick(ds); } return null; };
+  const last = (ds) => ds[ds.length - 1], first = (ds) => ds[0];
+  const closing = near(/closing date|close date|statement closing|fecha de cierre|fecha de corte/i, last)
+    || near(/opening\/closing|open to close|statement period|for the period|período|periodo/i, last)
+    || near(/\bthrough\b/i, last)
+    || (() => { for (const t of tl) { const ds = datesIn(t); if (ds.length === 2 && /^\s*\S.*\s(-|–|to|al|a)\s/.test(t) && t.replace(D, "").replace(/[\s\-–]|to|al|a/g, "").length < 4) return ds[1]; } return null; })();
+  const due = near(/payment due date|due date|fecha (límite|limite) de pago|pago mínimo antes/i, first);
+  let balance = null;
+  for (const t of tl) { const m = t.match(/(new balance|statement balance|ending balance|saldo (final|nuevo))[^\d$-]*(-?\$?\s*-?[\d,]+\.\d{2})/i); if (m) { balance = parseMoney(m[3]); break; } }
+  return { closing, due, balance };
+}
+// Cargar muchos estados de cuenta de una cuenta a la vez (historial desde la apertura)
+async function bulkStatementsDialog(ent) {
+  const { cards } = await api("/cards?entity=" + ent.id);
+  const cardSel = h("select", { name: "card_id", required: true }, h("option", { value: "" }, "Elige la cuenta o tarjeta"), byBank(cards).map(([bank, list]) => h("optgroup", { label: bank }, list.map((c) => h("option", { value: c.id }, `${c.nickname} •••• ${c.last4}`)))));
+  const filesIn = h("input", { type: "file", name: "files", multiple: true, accept: "application/pdf,.pdf,.csv,.xlsx,.xls" });
+  const log = h("div", { class: "stack", style: "gap:4px;max-height:40vh;overflow:auto" });
+  const say = (txt, color) => { log.append(h("div", { class: "small", style: color ? "color:var(" + color + ")" : "" }, txt)); log.scrollTop = 1e9; };
+  modal("Cargar estados de cuenta", () => h("div", { class: "stack" },
+    h("p", { class: "small muted", style: "margin:0" }, "Elige la cuenta y sube todos sus estados de cuenta (PDF) de una vez. De cada uno se guardan el archivo, sus movimientos (sin repetir los que ya están) y las fechas de cierre y de pago."),
+    fld("Cuenta o tarjeta", cardSel), fld("Estados de cuenta (puedes elegir varios)", filesIn), log),
+  async (fd, form) => {
+    const card = cards.find((c) => c.id === cardSel.value); if (!card) throw new Error("Elige la cuenta.");
+    const files = [...filesIn.files].sort((a, z) => a.name.localeCompare(z.name)); if (!files.length) throw new Error("Elige los archivos.");
+    const btn = form.querySelector("[type=submit]"); btn.disabled = true;
+    let tot = 0, dupT = 0, ok = 0;
+    for (const [i, f] of files.entries()) {
+      btn.textContent = `Cargando ${i + 1} de ${files.length}…`;
+      try {
+        let lines = [], meta = { closing: null, due: null, balance: null };
+        if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") {
+          const tl = await pdfTextLines(f).catch(() => []);
+          meta = statementMeta(tl);
+          lines = bankFromPdf(tl, { credit: card.card_type !== "debito", dmy: false });
+          if (!lines.length && tl.join(" ").length > 200 && !/no (activity|transactions)|sin movimientos/i.test(tl.join(" "))) lines = (await api("/bank/read", { method: "POST", body: { text: tl.join("\n") } })).lines || [];
+        } else { const r = bankFromRows(await readRows(f), { dmy: false }); lines = r ? r.lines : []; }
+        const up = new FormData(); up.append("entity_id", ent.id); up.append("card_id", card.id);
+        up.append("lines", JSON.stringify(lines.map(({ posted_on, description, amount }) => ({ posted_on, description, amount }))));
+        if (meta.closing) up.append("closing_date", meta.closing); if (meta.due) up.append("due_date", meta.due); if (meta.balance != null) up.append("balance", meta.balance);
+        if (/\.pdf$/i.test(f.name)) { const prep = await prepareUpload(f); up.append("file", prep.file, f.name); up.append("original_size", prep.originalSize ?? f.size); }
+        const r = await api("/bank/statement", { method: "POST", body: up });
+        tot += r.added; dupT += r.duplicates; ok++;
+        say(`✓ ${f.name}: cierre ${fdate(r.closing_date)}${card.card_type !== "debito" ? " · pago " + fdate(r.due_date) : ""} · ${r.added} nuevos${r.duplicates ? ", " + r.duplicates + " ya estaban" : ""}`);
+      } catch (e) { say(`✗ ${f.name}: ${e.message}`, "--bad"); }
+    }
+    btn.disabled = false; btn.textContent = "Cargar";
+    say(`Listo: ${ok} de ${files.length} estados de cuenta, ${tot} movimientos nuevos${dupT ? ", " + dupT + " repetidos omitidos" : ""}.`, "--ok");
+    toast(`${ok} estados de cuenta cargados · ${tot} movimientos nuevos.`);
+    throw new Error("Revisa el resultado arriba. Puedes cerrar esta ventana o cargar otra cuenta.");
+  }, "Cargar");
 }
 async function bankImportDialog(ent, opts = {}) {
   const { cards } = await api("/cards?entity=" + ent.id);

@@ -516,7 +516,7 @@ const ownerEmail = (env) => String(env.ADMIN_EMAIL || "contact@starkumholdings.c
 const spaceEnt = (sid) => (sid === "personal" ? "personal" : "sp:" + sid);
 // Cuentas de un perfil: el de Jonth ("personal") por su regla de siempre; los demás, las que se le asignaron
 async function spaceCards(env, sid) {
-  if (sid === "personal") return (await env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id = 'personal' OR owner = 'personal') ORDER BY others_money, card_type DESC, nickname").all()).results;
+  if (sid === "personal") return (await env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id = 'personal' OR (owner = 'personal' AND COALESCE(entity_id, '') NOT LIKE 'sp:%')) ORDER BY others_money, card_type DESC, nickname").all()).results;
   // Las propias del perfil (entity_id sp:…) y las compartidas desde otro perfil (space_cards); "oculta" es por perfil
   const rows = (await env.DB.prepare("SELECT c.*, sc.hidden AS sp_hidden, sc.space_id AS shared_in FROM cards c LEFT JOIN space_cards sc ON sc.card_id = c.id AND sc.space_id = ? WHERE c.active = 1 AND (c.entity_id = ? OR sc.space_id IS NOT NULL) ORDER BY c.card_type DESC, c.nickname").bind(sid, "sp:" + sid).all()).results;
   return rows.map(({ sp_hidden, shared_in, ...c }) => ({ ...c, hide_summary: shared_in ? sp_hidden : c.hide_summary, shared: !!shared_in && c.entity_id !== "sp:" + sid }));
@@ -540,7 +540,7 @@ async function vesRate(env) {
 async function seedSpaces(env) {
   if (await env.DB.prepare("SELECT value FROM settings WHERE key = 'spaces_v1'").first()) return;
   const q = [env.DB.prepare("INSERT OR IGNORE INTO spaces (id, name, person, created_at) VALUES ('dayana', 'Finanzas Dayana', 'dayana', ?)").bind(now())];
-  const cards = (await env.DB.prepare("SELECT id, nickname, issuer, last4 FROM cards WHERE active = 1 AND (entity_id = 'personal' OR owner = 'personal')").all()).results
+  const cards = (await env.DB.prepare("SELECT id, nickname, issuer, last4 FROM cards WHERE active = 1 AND (entity_id = 'personal' OR (owner = 'personal' AND COALESCE(entity_id, '') NOT LIKE 'sp:%'))").all()).results
     .filter((c) => /chase/i.test((c.issuer || "") + " " + c.nickname) && ["2033", "0828"].includes(String(c.last4)));
   for (const c of cards) q.push(env.DB.prepare("INSERT OR IGNORE INTO space_cards (space_id, card_id, hidden) VALUES ('dayana', ?, 0)").bind(c.id));
   q.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('spaces_v1', ?)").bind(now()));
@@ -553,7 +553,7 @@ async function getSpace(env, sid) {
 const STANDARD_WRITES = [
   ["POST", /^\/invoices$/], ["POST", /^\/invoices\/[\w-]+\/extract$/], ["PUT", /^\/invoices\/[\w-]+$/],
   ["POST", /^\/docs$/], ["POST", /^\/docs\/[\w-]+\/extract$/], ["POST", /^\/tax\/periods\/[\w-]+\/file$/], ["POST", /^\/records$/], ["POST", /^\/send$/], ["POST", /^\/scan\/logs$/], ["POST", /^\/lots$/], ["POST", /^\/moves$/],
-  ["POST", /^\/bank\/read$/], ["POST", /^\/bank\/lines$/], ["POST", /^\/settlements$/],
+  ["POST", /^\/bank\/read$/], ["POST", /^\/bank\/lines$/], ["POST", /^\/bank\/statement$/], ["POST", /^\/settlements$/],
 ];
 function permissionError(role, method, path) {
   if (method === "GET" || path === "/auth/logout" || role === "admin") return null;
@@ -1017,7 +1017,7 @@ async function api(req, env, url, user) {
   // Quien solo tiene perfiles de finanzas no ve nada de las empresas
   if (spaceOnly) {
     const allowed = p === "/me" || p === "/auth/logout" || p === "/entities" || p === "/businesses" || p === "/platforms" || p.startsWith("/personal/") || (p === "/spaces" && m === "GET") || p === "/fx/ves"
-      || (p === "/bank/read" && m === "POST") || (p === "/bank/lines" && m === "POST")
+      || (p === "/bank/read" && m === "POST") || (p === "/bank/lines" && m === "POST") || (p === "/bank/statement" && m === "POST")
       || (p === "/cards" && (m === "GET" || m === "POST")) || (/^\/cards\/[\w-]+$/.test(p) && m === "PUT") || (/^\/cards\/cycles\/[\w-]+\/file$/.test(p) && m === "POST")
       || (p === "/moves" && m === "POST") || (/^\/moves\/[\w-]+$/.test(p) && m === "DELETE") || (/^\/bank\/lines\/[\w-]+$/.test(p) && m === "PUT")
       || (p === "/subs" && m !== "DELETE") || (/^\/subs\/[\w-]+$/.test(p) && (m === "PUT" || m === "DELETE"));
@@ -1037,7 +1037,7 @@ async function api(req, env, url, user) {
   const cardInMySpaces = async (cardId) => {
     if (isOwner) return true;
     const ids = acc.spaces.filter((x) => x !== "personal" && (!writing || acc.levels[x] === "admin"));
-    if (cardId && (writing ? canWriteSpace("personal") : canSpace("personal"))) { const c = await env.DB.prepare("SELECT 1 FROM cards WHERE id = ? AND (entity_id = 'personal' OR owner = 'personal')").bind(cardId).first(); if (c) return true; }
+    if (cardId && (writing ? canWriteSpace("personal") : canSpace("personal"))) { const c = await env.DB.prepare("SELECT 1 FROM cards WHERE id = ? AND (entity_id = 'personal' OR (owner = 'personal' AND COALESCE(entity_id, '') NOT LIKE 'sp:%'))").bind(cardId).first(); if (c) return true; }
     if (!cardId || !ids.length) return false;
     return !!(await env.DB.prepare(`SELECT 1 FROM space_cards WHERE card_id = ? AND space_id IN (${ids.map(() => "?").join(",")}) LIMIT 1`).bind(cardId, ...ids).first());
   };
@@ -1424,7 +1424,7 @@ async function api(req, env, url, user) {
     await ensureCycles(env);
     const [cards, cycles, uses] = await Promise.all([
       (entSpace(url.searchParams.get("entity")) ? { all: async () => ({ results: await spaceCards(env, entSpace(url.searchParams.get("entity"))) }) }
-        : url.searchParams.get("entity") === "personal" ? env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id = 'personal' OR owner = 'personal') ORDER BY others_money, nickname")
+        : url.searchParams.get("entity") === "personal" ? env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND (entity_id = 'personal' OR (owner = 'personal' AND COALESCE(entity_id, '') NOT LIKE 'sp:%')) ORDER BY others_money, nickname")
         : url.searchParams.get("entity") ? env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND COALESCE(entity_id, '') != 'personal' AND (entity_id IS NULL OR entity_id = '' OR entity_id = ?) ORDER BY nickname").bind(url.searchParams.get("entity")) : env.DB.prepare("SELECT * FROM cards WHERE active = 1 AND COALESCE(entity_id, '') != 'personal' ORDER BY nickname")).all(),
       env.DB.prepare("SELECT cc.*, f.filename FROM card_cycles cc LEFT JOIN files f ON f.id = cc.file_id ORDER BY cc.closing_date DESC").all(),
       env.DB.prepare("SELECT card_id, COUNT(*) AS n, COALESCE(SUM(total),0) AS total FROM invoices WHERE card_id IS NOT NULL GROUP BY card_id").all(),
@@ -1642,6 +1642,54 @@ async function api(req, env, url, user) {
     await reconcile(env, ent, from, to);
     const st = await env.DB.prepare("SELECT SUM(status = 'conciliado') AS ok, SUM(status = 'sin_soporte') AS missing FROM bank_lines WHERE entity_id = ? AND COALESCE(card_id,'') = ? AND posted_on BETWEEN ? AND ?").bind(ent, cardId || "", from, to).first();
     return json({ added: ins.length, duplicates: dup, matched: st.ok || 0, missing: st.missing || 0 });
+  }
+  // Un estado de cuenta completo: archivo + sus movimientos + su ciclo (fecha de cierre y de pago). Sirve para cargar historiales viejos.
+  if (p === "/bank/statement" && m === "POST") {
+    const fd = await req.formData();
+    const ent = String(fd.get("entity_id") || ""); const cardId = String(fd.get("card_id") || "");
+    if (!entOk(ent) || !cardId) return fail("Elige la cuenta.");
+    const card = await env.DB.prepare("SELECT * FROM cards WHERE id = ?").bind(cardId).first();
+    if (!card) return fail("No encontrado.", 404);
+    if (!isOwner && (entSpace(ent) || entSpace(card.entity_id)) && card.entity_id !== ent && !(await cardInMySpaces(cardId))) return fail("No encontrado.", 404);
+    const closing = isoDate(fd.get("closing_date")); let due = isoDate(fd.get("due_date"));
+    let lines; try { lines = JSON.parse(String(fd.get("lines") || "[]")); } catch { lines = []; }
+    lines = lines.map((l) => ({ posted_on: isoDate(l.posted_on), description: String(l.description || "").replace(/\d{9,}/g, (d) => "•••• " + d.slice(-4)).trim().slice(0, 200), amount: Math.round((num(l.amount) || 0) * 100) / 100 })).filter((l) => l.posted_on && l.description && l.amount);
+    if (!closing && !lines.length) return fail("No encontré la fecha del estado de cuenta ni movimientos.");
+    const cycDate = closing || lines.reduce((a, l) => (l.posted_on > a ? l.posted_on : a), "0000");
+    const debit = card.card_type === "debito";
+    if (debit || !due) due = due || (debit ? cycDate : shiftDate(cycDate, 25));
+    // Si ese ciclo ya tiene su archivo, no se vuelve a guardar el PDF
+    const cyc0 = await env.DB.prepare("SELECT id, file_id FROM card_cycles WHERE card_id = ? AND closing_date = ?").bind(cardId, cycDate).first();
+    let fileId = cyc0?.file_id || null; let storedNew = false;
+    const file = fd.get("file");
+    if (!fileId && file && file.size) { fileId = await storeFile(env, user, file, fd.get("original_size")); storedNew = true; }
+    // Movimientos sin repetir lo que ya está en esa cuenta (del banco conectado o de otro extracto)
+    let added = 0, dup = 0;
+    if (lines.length) {
+      const lo = lines.reduce((a, l) => (l.posted_on < a ? l.posted_on : a), "9999"), hi = lines.reduce((a, l) => (l.posted_on > a ? l.posted_on : a), "0000");
+      const pool = (await env.DB.prepare("SELECT posted_on, amount FROM bank_lines WHERE card_id = ? AND posted_on BETWEEN ? AND ?").bind(cardId, shiftDate(lo, -4), shiftDate(hi, 4)).all()).results.map((e) => ({ d: e.posted_on, a: Math.round(e.amount * 100), used: false }));
+      const dd = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / 864e5;
+      const ins = [];
+      for (const l of lines) {
+        const a100 = Math.round(l.amount * 100);
+        const hit = pool.find((e) => !e.used && e.a === a100 && dd(e.d, l.posted_on) <= 4);
+        if (hit) { hit.used = true; dup++; continue; }
+        pool.push({ d: l.posted_on, a: a100, used: true });
+        ins.push(env.DB.prepare("INSERT INTO bank_lines (id, entity_id, card_id, file_id, posted_on, description, amount, created_at) VALUES (?,?,?,?,?,?,?,?)").bind(uid(), ent, cardId, fileId, l.posted_on, l.description, l.amount, now()));
+      }
+      for (let i = 0; i < ins.length; i += 80) await env.DB.batch(ins.slice(i, i + 80));
+      added = ins.length;
+    }
+    // El ciclo del estado de cuenta (los vencidos se dan por pagados para no generar avisos viejos)
+    const today = now().slice(0, 10); const bal = num(fd.get("balance"));
+    await env.DB.prepare("INSERT OR IGNORE INTO card_cycles (id, card_id, closing_date, due_date, paid, created_at) VALUES (?,?,?,?,?,?)").bind(uid(), cardId, cycDate, due, debit || due < today ? 1 : 0, now()).run();
+    await env.DB.prepare("UPDATE card_cycles SET file_id = COALESCE(file_id, ?), due_date = ?, amount = COALESCE(?, amount) WHERE card_id = ? AND closing_date = ?").bind(fileId, due, bal, cardId, cycDate).run();
+    // Días de cierre y pago de la tarjeta: los del estado de cuenta más reciente
+    const newest = await env.DB.prepare("SELECT MAX(closing_date) AS d FROM card_cycles WHERE card_id = ? AND file_id IS NOT NULL").bind(cardId).first();
+    if (closing && newest?.d === cycDate) await env.DB.prepare("UPDATE cards SET closing_day = ?, due_day = ? WHERE id = ?").bind(Number(cycDate.slice(8, 10)), debit ? card.due_day : Number(due.slice(8, 10)), cardId).run();
+    if (ent === "personal" || String(ent).startsWith("sp:")) await categorizePersonal(env);
+    else if (lines.length) await reconcile(env, ent, lines.reduce((a, l) => (l.posted_on < a ? l.posted_on : a), "9999"), cycDate);
+    return json({ ok: true, closing_date: cycDate, due_date: due, added, duplicates: dup, file: storedNew ? "nuevo" : fileId ? "ya estaba" : "sin archivo" });
   }
   if ((mm = p.match(/^\/bank\/lines\/([\w-]+)$/)) && m === "PUT") {
     const b = await body();
