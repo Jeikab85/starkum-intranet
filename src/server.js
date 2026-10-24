@@ -483,7 +483,7 @@ async function sfinStore(env, data, updateBalances, touched) {
       const desc = String(t.description || t.payee || t.memo || "Movimiento").replace(/\d{9,}/g, (x) => "•••• " + x.slice(-4)).slice(0, 200);
       if (have.has(ext)) { ins.push(env.DB.prepare("UPDATE bank_lines SET posted_on = ?, amount = ?, pending = ? WHERE ext_id = ?").bind(day, amount, Number(t.posted) ? 0 : 1, ext)); continue; }
       // En la empresa puede existir ya el mismo movimiento leído de un extracto: se une a él en vez de duplicarlo
-      if (["llc", "sas"].includes(ent)) {
+      {
         const same = await env.DB.prepare("SELECT id FROM bank_lines WHERE card_id = ? AND ext_id IS NULL AND ABS(amount - ?) < 0.005 AND posted_on BETWEEN ? AND ? ORDER BY ABS(julianday(posted_on) - julianday(?)) LIMIT 1").bind(card.id, amount, shiftDate(day, -4), shiftDate(day, 4), day).first();
         if (same) { ins.push(env.DB.prepare("UPDATE bank_lines SET ext_id = ?, pending = ? WHERE id = ?").bind(ext, Number(t.posted) ? 0 : 1, same.id)); have.add(ext); continue; }
       }
@@ -1615,17 +1615,23 @@ async function api(req, env, url, user) {
     let fileId = String(fd.get("file_id") || "") || null;
     const file = fd.get("file");
     if (!fileId && file && file.size) fileId = await storeFile(env, user, file, fd.get("original_size"));
-    const existing = (await env.DB.prepare("SELECT posted_on, amount, description FROM bank_lines WHERE entity_id = ? AND COALESCE(card_id,'') = ? AND posted_on BETWEEN ? AND ?")
-      .bind(ent, cardId || "", lines.reduce((a, l) => (l.posted_on < a ? l.posted_on : a), "9999"), lines.reduce((a, l) => (l.posted_on > a ? l.posted_on : a), "0000")).all()).results;
-    const seen = new Set(existing.map((e) => `${e.posted_on}|${e.amount.toFixed(2)}|${e.description}`));
+    const lo = lines.reduce((a, l) => (l.posted_on < a ? l.posted_on : a), "9999"), hi = lines.reduce((a, l) => (l.posted_on > a ? l.posted_on : a), "0000");
+    // Con cuenta: lo que ya está en esa cuenta (venga del banco conectado o de otro extracto) no se repite aunque la descripción cambie
+    const existing = (cardId
+      ? await env.DB.prepare("SELECT posted_on, amount, description FROM bank_lines WHERE card_id = ? AND posted_on BETWEEN ? AND ?").bind(cardId, shiftDate(lo, -4), shiftDate(hi, 4)).all()
+      : await env.DB.prepare("SELECT posted_on, amount, description FROM bank_lines WHERE entity_id = ? AND card_id IS NULL AND posted_on BETWEEN ? AND ?").bind(ent, lo, hi).all()).results;
+    const pool = existing.map((e) => ({ d: e.posted_on, a: Math.round(e.amount * 100), desc: e.description, used: false }));
+    const dayDiff = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / 864e5;
     const ins = []; let dup = 0;
     for (const l of lines) {
-      const k = `${l.posted_on}|${l.amount.toFixed(2)}|${l.description}`;
-      if (seen.has(k)) { dup++; continue; } seen.add(k);
+      const a100 = Math.round(l.amount * 100);
+      const hit = pool.find((e) => !e.used && e.a === a100 && (cardId ? dayDiff(e.d, l.posted_on) <= 4 : e.d === l.posted_on && e.desc === l.description));
+      if (hit) { hit.used = true; dup++; continue; }
+      pool.push({ d: l.posted_on, a: a100, desc: l.description, used: true });
       ins.push(env.DB.prepare("INSERT INTO bank_lines (id, entity_id, card_id, file_id, posted_on, description, amount, created_at) VALUES (?,?,?,?,?,?,?,?)").bind(uid(), ent, cardId, fileId, l.posted_on, l.description, l.amount, now()));
     }
     for (let i = 0; i < ins.length; i += 80) await env.DB.batch(ins.slice(i, i + 80));
-    if (ent === "personal") await categorizePersonal(env);
+    if (ent === "personal" || String(ent).startsWith("sp:")) await categorizePersonal(env);
     // El archivo queda también como estado de cuenta del ciclo que le corresponde, si ese ciclo no tiene uno
     if (cardId && fileId) {
       const last = lines.reduce((a, l) => (l.posted_on > a ? l.posted_on : a), "0000");
