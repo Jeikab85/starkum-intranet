@@ -1751,7 +1751,8 @@ function bankFromRows(rows, { dmy }) {
   const H = rows[hi].map((c) => c.toLowerCase());
   const col = (re, not) => H.findIndex((c) => re.test(c) && !(not && not.test(c)));
   let cDate = col(/post/); if (cDate < 0 || !/date|fecha/.test(H[cDate])) cDate = col(/date|fecha/);
-  let cDesc = col(/desc|memo|payee|detail|concepto|merchant|referencia|name|nombre/, /date|fecha|amount|monto|type/); if (cDesc < 0) cDesc = col(/transaction|transacci/, /date|fecha|amount|monto|id/);
+  // "Description" antes que "Details" (en los CSV de Chase, Details solo dice DEBIT/CREDIT)
+  let cDesc = col(/desc|concepto/, /date|fecha|amount|monto|type/); if (cDesc < 0) cDesc = col(/memo|payee|detail|merchant|referencia|name|nombre/, /date|fecha|amount|monto|type/); if (cDesc < 0) cDesc = col(/transaction|transacci/, /date|fecha|amount|monto|id/);
   const cAmt = col(/amount|monto|valor|importe/, /balance|saldo|debit|credit|d[ée]bito|cr[ée]dito/);
   const cDeb = col(/debit|withdraw|cargo|retiro|d[ée]bito/), cCred = col(/credit|deposit|abono|cr[ée]dito/, /card|tarjeta/);
   const lines = [];
