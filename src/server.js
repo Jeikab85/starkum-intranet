@@ -2442,12 +2442,17 @@ async function authRoutes(req, env, url) {
       if (prev && Date.now() - prev.sent_at < 45_000) return json({ ok: true, wait: true });
       const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
       await env.DB.prepare("INSERT OR REPLACE INTO login_codes (email, code_hash, expires_at, attempts, sent_at) VALUES (?,?,?,0,?)").bind(e, await sha256(e + ":" + code), Date.now() + 10 * 60_000, Date.now()).run();
-      await sendMail(env, {
+      // Cloudflare solo entrega a correos verificados: si no lo está, se avisa claro en vez de "error interno"
+      try { await sendMail(env, {
         to: e, subject: `Tu código de acceso: ${code}`,
         text: `Tu código para entrar a la intranet Starkum es ${code}.\n\nVence en 10 minutos. Si no lo pediste, ignora este correo.`,
         html: `<div style="font-family:Arial,sans-serif;font-size:15px;color:#14232b"><p>Tu código para entrar a la intranet Starkum es:</p><p style="font-size:30px;font-weight:bold;letter-spacing:6px">${code}</p><p style="color:#5b6b73">Vence en 10 minutos. Si no lo pediste, ignora este correo.</p></div>`,
         devNote: `código ${code}`,
-      });
+      }); } catch (err) {
+        await env.DB.prepare("DELETE FROM login_codes WHERE email = ?").bind(e).run();
+        console.log("login mail " + e + ": " + err.message);
+        return fail(/verified/i.test(err.message || "") ? "Todavía no se pueden enviar códigos a este correo: el administrador debe verificarlo primero. Avísale." : "No se pudo enviar el código. Inténtalo en unos minutos.", 503);
+      }
     }
     return json({ ok: true });
   }
