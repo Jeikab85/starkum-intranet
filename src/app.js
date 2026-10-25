@@ -839,15 +839,17 @@ function cardSelect(cards, selected, emptyLabel) {
 async function cardsView(entityId) {
   const { cards } = await api("/cards?entity=" + entityId);
   const today = new Date().toISOString().slice(0, 10);
-  const cyclesView = (c) => {
+  const cyclesView = (c, showAll) => {
     const debit = c.card_type === "debito";
-    const rows = c.cycles.filter((x) => x.closing_date <= today || x.paid || x.file_id).slice(0, 4);
+    const allRows = c.cycles.filter((x) => x.closing_date <= today || x.paid || x.file_id); const nFiles = allRows.filter((x) => x.file_id).length;
+    const rows = showAll ? allRows : allRows.slice(0, 4);
     if (!debit && (!c.closing_day || !c.due_day)) return h("p", { class: "small muted", style: "margin:0" }, "Agrega el día de cierre y el de pago para recibir recordatorios y guardar los estados de cuenta.");
     const next = [...c.cycles].reverse().find((x) => !x.paid && x.due_date >= today);
     return h("div", { class: "stack", style: "gap:6px" },
       h("b", { class: "small" }, debit ? "Extractos bancarios" : "Estados de cuenta y pagos"),
       !debit && next ? h("p", { class: "small", style: "margin:0" }, "Próximo pago: ", h("b", null, fdate(next.due_date)), ` (cierre ${fdate(next.closing_date)}). Mejor día para comprar: el día después del cierre.`) : "",
       debit ? h("p", { class: "small muted", style: "margin:0" }, isFinEnt(entityId) ? "Es de débito: no hay pagos que recordar. Guarda aquí el extracto de cada mes." : "Es de débito: no hay pagos que recordar. El extracto de la cuenta es el mismo archivo que está en Documentos › Bancarios: súbelo en cualquiera de los dos lados y queda en ambos.") : "",
+      nFiles ? h("span", { class: "small muted" }, `${nFiles} ${debit ? "extracto" : "estado"}${nFiles === 1 ? "" : "s"} de cuenta guardado${nFiles === 1 ? "" : "s"}${allRows.length ? " · desde " + fdate(allRows[allRows.length - 1].closing_date) : ""}`) : "",
       rows.length ? h("div", { class: "tablewrap" }, h("table", { style: "min-width:520px" }, h("thead", null, h("tr", null, (debit ? ["Corte", "Extracto", ""] : ["Cierre", "Pago", "Estado", "Estado de cuenta", ""]).map((t) => h("th", null, t)))),
         h("tbody", null, rows.map((x) => h("tr", null, h("td", { class: "mono" }, fdate(x.closing_date)),
           debit ? "" : h("td", { class: "mono" }, fdate(x.due_date)),
@@ -855,7 +857,8 @@ async function cardsView(entityId) {
           h("td", null, x.file_id ? h("a", { href: "/api/files/" + x.file_id, target: "_blank", rel: "noopener" }, "Ver") : h("span", { class: "muted small" }, "—")),
           h("td", { class: "only-admin" }, h("span", { class: "row", style: "gap:6px" },
             !debit && x.closing_date <= today && !(x.paid && !x.paid_on && x.due_date < c.created_at.slice(0, 10)) ? h("button", { class: "linkbtn small", type: "button", onclick: async () => { await api("/cards/cycles/" + x.id, { method: "PUT", body: { paid: !x.paid } }); toast(x.paid ? "Marcada como no pagada." : "Pago registrado."); route(); } }, x.paid ? "Desmarcar" : "Marcar pagada (total)") : "",
-            h("button", { class: "linkbtn small", type: "button", onclick: () => statementDialog(c, x, entityId) }, x.file_id ? "Cambiar archivo" : debit ? "Subir extracto" : "Subir estado de cuenta")))))))) : "");
+            h("button", { class: "linkbtn small", type: "button", onclick: () => statementDialog(c, x, entityId) }, x.file_id ? "Cambiar archivo" : debit ? "Subir extracto" : "Subir estado de cuenta")))))))) : "",
+      allRows.length > rows.length ? h("button", { class: "linkbtn small", type: "button", style: "align-self:flex-start;font-weight:700", onclick: (e) => { const box = e.currentTarget.parentElement; box.replaceWith(cyclesView(c, true)); } }, `Ver todos (${allRows.length}) →`) : "");
   };
   const info = (c) => {
     const debit = c.card_type === "debito";

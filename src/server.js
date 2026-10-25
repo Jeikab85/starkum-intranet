@@ -1432,7 +1432,7 @@ async function api(req, env, url, user) {
       env.DB.prepare("SELECT cc.*, f.filename FROM card_cycles cc LEFT JOIN files f ON f.id = cc.file_id ORDER BY cc.closing_date DESC").all(),
       env.DB.prepare("SELECT card_id, COUNT(*) AS n, COALESCE(SUM(total),0) AS total FROM invoices WHERE card_id IS NOT NULL GROUP BY card_id").all(),
     ]);
-    return json({ cards: cards.results.map((c) => ({ ...c, cycles: cycles.results.filter((x) => x.card_id === c.id).slice(0, 6), uses: uses.results.find((u) => u.card_id === c.id) || { n: 0, total: 0 } })) });
+    return json({ cards: cards.results.map((c) => ({ ...c, cycles: cycles.results.filter((x) => x.card_id === c.id), uses: uses.results.find((u) => u.card_id === c.id) || { n: 0, total: 0 } })) });
   }
   if (p === "/cards/read" && m === "POST") {
     const b = await body();
