@@ -1294,6 +1294,28 @@ function catBars(list, usd) {
     h("div", { class: "row between small" }, h("span", null, c.category), h("b", { class: "mono" }, usd(c.total))),
     h("div", { style: "height:8px;border-radius:5px;background:var(--line);overflow:hidden" }, h("div", { style: `height:100%;width:${(c.total / max) * 100}%;background:linear-gradient(90deg,#6b767e,#3f6f57)` }))))) : h("p", { class: "empty" }, "Sin gastos en este período.");
 }
+// Uso del crédito: deuda de las tarjetas de crédito frente a su límite (sin préstamos como el del carro)
+function creditUse(accounts, usd) {
+  const cards = accounts.filter((a) => a.card_type === "credito" && !a.company && (a.currency || "USD") === "USD");
+  const withLimit = cards.filter((a) => Number(a.credit_limit) > 0), noLimit = cards.filter((a) => !(Number(a.credit_limit) > 0));
+  if (!withLimit.length) return "";
+  const debt = (a) => Math.max(0, -(Number(a.balance) || 0));
+  const used = withLimit.reduce((s, a) => s + debt(a), 0), limit = withLimit.reduce((s, a) => s + Number(a.credit_limit), 0);
+  const pct = (u, l) => (l ? (u / l) * 100 : 0);
+  const tone = (p) => (p <= 10 ? "var(--ok)" : p <= 30 ? "#3f6f57" : p <= 50 ? "var(--warn)" : "var(--bad)");
+  const bar = (p) => h("div", { style: "height:10px;border-radius:5px;background:var(--line);overflow:hidden" }, h("div", { style: `height:100%;width:${Math.min(100, p)}%;background:${tone(p)}` }));
+  const total = pct(used, limit);
+  return h("section", { class: "card stack", style: "gap:10px" },
+    h("div", { class: "row between", style: "gap:8px;flex-wrap:wrap" }, h("h2", { style: "margin:0" }, "Uso de tu crédito"),
+      h("b", { class: "mono", style: `font-size:22px;color:${tone(total)}` }, total.toFixed(1) + "%")),
+    h("p", { class: "small muted", style: "margin:0" }, `Debes ${usd(used)} de un límite total de ${usd(limit)} en tus tarjetas (sin el préstamo del carro). `,
+      total <= 30 ? "Por debajo del 30%: es lo que ayuda a tu puntaje de crédito." : "Por encima del 30%: bajar de ese nivel ayuda a tu puntaje de crédito."),
+    bar(total),
+    h("div", { class: "stack", style: "gap:8px" }, withLimit.sort((x, z) => pct(debt(z), z.credit_limit) - pct(debt(x), x.credit_limit)).map((a) => { const p = pct(debt(a), Number(a.credit_limit));
+      return h("div", { class: "stack", style: "gap:3px" }, h("div", { class: "row between small", style: "gap:8px" }, h("span", null, h("b", null, a.nickname), h("span", { class: "muted" }, " •••• " + a.last4)),
+        h("span", { class: "mono" }, `${usd(debt(a))} de ${usd(Number(a.credit_limit))} · `, h("b", { style: `color:${tone(p)}` }, p.toFixed(0) + "%"))), bar(p)); })),
+    noLimit.length ? h("p", { class: "small muted", style: "margin:0" }, "Sin límite registrado (no se cuentan): " + noLimit.map((a) => `${a.nickname} •••• ${a.last4}`).join(", ") + ". Agrégalo en Cuentas y tarjetas › Editar.") : "");
+}
 function personalSummary(d, month, year) {
   const usd = (v) => money(v, "USD");
   const self = d.space?.person || "personal";
@@ -1333,6 +1355,7 @@ function personalSummary(d, month, year) {
     h("h2", { style: "margin:0" }, "Lo tuyo", h("span", { class: "small muted", style: "font-weight:400" }, " · solo los movimientos marcados como tuyos")),
     h("div", { class: "grid g4", style: loans.length ? "grid-template-columns:repeat(auto-fit,minmax(170px,1fr))" : "" }, stat(loans.length ? "Patrimonio (cuentas − tarjetas − préstamos)" : "Patrimonio (cuentas − tarjetas)", usd(cash - owed), cash - owed < 0 ? "color:var(--bad)" : ""), stat("Disponible en tus cuentas", usd(cash)), stat("Debes en tarjetas", usd(cardsOwed), cardsOwed ? "color:var(--warn)" : ""), loans.length ? stat("Debes en préstamos", usd(loansOwed), loansOwed ? "color:var(--warn)" : "") : "", stat("Ahorro " + label, usd(d.income - d.spend), d.income - d.spend < 0 ? "color:var(--bad)" : "color:var(--ok)")),
     h("div", { class: "grid g4" }, stat("Ingresos " + label, usd(d.income)), stat("Gastos " + label, usd(d.spend)), stat("Suscripciones " + label, usd(d.sub_charges.reduce((s, x) => s + (x.currency === "USD" ? x.amount : 0), 0))), stat("Promedio de gasto al mes", usd(year ? d.spend / Math.max(1, Number(year) === new Date().getFullYear() ? new Date().getMonth() + 1 : 12) : d.spend))),
+    creditUse(d.accounts, usd),
     (d.between || []).length ? h("section", { class: "card stack", style: "gap:8px" }, h("h2", null, "Cuentas entre personas"),
       h("p", { class: "small muted", style: "margin:0" }, "Sale de los movimientos que marcaste con otra persona en una cuenta que no es suya. Es el acumulado de todo el historial, no solo de este período."),
       ...d.between.map((x) => { const dn = x.debtor === self ? "Tú" : ownerName(x.debtor, d.people), cn = x.creditor === self ? "ti" : ownerName(x.creditor, d.people);
