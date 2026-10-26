@@ -2659,8 +2659,11 @@ export default {
       return fail("Error interno: " + (e.message || e), 500);
     }
   },
-  async scheduled(_event, env, ctx) {
-    ctx.waitUntil(dailyDigest(env));
-    ctx.waitUntil((async () => { try { await ensureSchema(env); for (const r of (await env.DB.prepare("SELECT key FROM settings WHERE key = 'sfin_access' OR key LIKE 'sfin_access:%'").all()).results) { try { await sfinSync(env, 30, null, r.key.split(":")[1] || "personal"); } catch (e) { console.log("sfin " + r.key + ": " + e.message); } } } catch (e) { console.log("sincronización SimpleFIN:", e.message); } })());
+  async scheduled(event, env, ctx) {
+    // 13:07 UTC: resumen diario + sincronización larga. Cada 3 horas: solo saldos y movimientos recientes,
+    // porque SimpleFIN actualiza cada banco una vez al día a horas distintas y así se recoge pronto.
+    const daily = !event?.cron || event.cron === "7 13 * * *";
+    if (daily) ctx.waitUntil(dailyDigest(env));
+    ctx.waitUntil((async () => { try { await ensureSchema(env); for (const r of (await env.DB.prepare("SELECT key FROM settings WHERE key = 'sfin_access' OR key LIKE 'sfin_access:%'").all()).results) { try { await sfinSync(env, daily ? 30 : 7, null, r.key.split(":")[1] || "personal"); } catch (e) { console.log("sfin " + r.key + ": " + e.message); } } } catch (e) { console.log("sincronización SimpleFIN:", e.message); } })());
   },
 };

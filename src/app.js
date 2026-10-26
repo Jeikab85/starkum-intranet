@@ -1511,7 +1511,7 @@ async function sfinView() {
     const all = [...cards, ...pcards.filter((c) => !cards.some((x) => x.id === c.id))];
     accBox = h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Cuentas conectadas"),
         h("span", { class: "row", style: "gap:8px" }, h("button", { class: "btn sm", type: "button", title: "Revisa en SimpleFIN si agregaste o eliminaste cuentas", onclick: (e) => busy(e.currentTarget, async () => { sfinCheck = true; await route(); }) }, "↻ Actualizar cuentas"),
-          h("button", { class: "btn primary sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => { const s2 = await api("/personal/sfin/sync", { method: "POST" }); toast(`Sincronizado: ${s2.added} movimiento(s) nuevos.`); route(); }) }, "Sincronizar ahora"),
+          h("button", { class: "btn primary sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => { const s2 = await api("/personal/sfin/sync", { method: "POST" }); toast(`Sincronizado: ${s2.added} movimiento(s) nuevos. Los saldos son los últimos que cada banco envió (lo hace una vez al día); la fecha aparece junto a cada saldo.`); route(); }) }, "Sincronizar ahora"),
           h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Desconectar SimpleFIN", "Se borra el acceso guardado. Los movimientos ya traídos se quedan.", async () => { await api("/personal/sfin", { method: "DELETE" }); toast("Desconectado."); route(); }) }, "Desconectar"))),
       checkBox, missBox,
       r.error ? h("p", { class: "small", style: "color:var(--bad);margin:0" }, r.error) : h("div", { class: "stack", style: "gap:10px" }, r.accounts.map((a) => {
@@ -1578,7 +1578,7 @@ async function companyBanks(ent, q) {
         h("span", { class: "row", style: "gap:14px;flex-wrap:wrap" }, card ? visBox(card) : "", sel)); });
     const manual = mine.filter((c) => !c.sfin_id);
     conn = h("section", { class: "card stack" }, h("div", { class: "row between" }, h("h2", null, "Conexión automática"),
-        h("span", { class: "row", style: "gap:8px" }, h("a", { class: "btn sm", href: "#/personal/conexion" }, "↻ Actualizar cuentas"), h("button", { class: "btn primary sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => { const s2 = await api("/personal/sfin/sync", { method: "POST" }); toast(`Sincronizado: ${s2.added} movimiento(s) nuevos.`); route(); }) }, "Sincronizar ahora"))),
+        h("span", { class: "row", style: "gap:8px" }, h("a", { class: "btn sm", href: "#/personal/conexion" }, "↻ Actualizar cuentas"), h("button", { class: "btn primary sm", type: "button", onclick: (e) => busy(e.currentTarget, async () => { const s2 = await api("/personal/sfin/sync", { method: "POST" }); toast(`Sincronizado: ${s2.added} movimiento(s) nuevos. Los saldos son los últimos que cada banco envió (lo hace una vez al día); la fecha aparece junto a cada saldo.`); route(); }) }, "Sincronizar ahora"))),
       r.error ? h("p", { class: "small", style: "color:var(--bad);margin:0" }, r.error) : "",
       rows.length ? h("div", null, rows) : h("p", { class: "small", style: "margin:0" }, "Ninguna cuenta de la empresa está en SimpleFIN todavía. Entra a SimpleFIN Bridge, agrega el banco de la empresa (por ejemplo Chase for Business o U.S. Bank Business) con su usuario de banca de empresas, y vuelve aquí: aparecerá en esta lista para asignarla."),
       manual.length ? h("div", { class: "stack", style: "gap:4px" }, h("b", { class: "small" }, "Cuentas sin conexión automática (se alimentan con los extractos)"),
