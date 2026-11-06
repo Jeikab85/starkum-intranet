@@ -1313,7 +1313,8 @@ function creditUse(accounts, usd) {
     bar(total),
     h("div", { class: "stack", style: "gap:8px" }, withLimit.sort((x, z) => pct(debt(z), z.credit_limit) - pct(debt(x), x.credit_limit)).map((a) => { const p = pct(debt(a), Number(a.credit_limit));
       return h("div", { class: "stack", style: "gap:3px" }, h("div", { class: "row between small", style: "gap:8px" }, h("span", null, h("b", null, a.nickname), h("span", { class: "muted" }, " •••• " + a.last4)),
-        h("span", { class: "mono" }, `${usd(debt(a))} de ${usd(Number(a.credit_limit))} · `, h("b", { style: `color:${tone(p)}` }, p.toFixed(0) + "%"))), bar(p)); })),
+        h("span", { class: "mono" }, `${usd(debt(a))} de ${usd(Number(a.credit_limit))} · `, h("b", { style: `color:${tone(p)}` }, p.toFixed(0) + "%"))), bar(p),
+        a.available != null && Number(a.available) > 0 ? h("span", { class: "small muted" }, `El banco reporta ${usd(Number(a.available))} disponibles${a.balance_at ? " al " + fdate(a.balance_at) : ""}`) : ""); })),
     noLimit.length ? h("p", { class: "small muted", style: "margin:0" }, "Sin límite registrado (no se cuentan): " + noLimit.map((a) => `${a.nickname} •••• ${a.last4}`).join(", ") + ". Agrégalo en Cuentas y tarjetas › Editar.") : "");
 }
 function personalSummary(d, month, year) {

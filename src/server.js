@@ -464,12 +464,16 @@ async function sfinSync(env, days = 30, fromDate = null, sid = "personal") {
   return status;
 }
 async function sfinStore(env, data, updateBalances, touched) {
-  const cards = (await env.DB.prepare("SELECT id, entity_id, owner, sfin_id FROM cards WHERE sfin_id IS NOT NULL").all()).results;
+  const cards = (await env.DB.prepare("SELECT id, entity_id, owner, sfin_id, card_type, credit_limit FROM cards WHERE sfin_id IS NOT NULL").all()).results;
   let added = 0;
   for (const a of data.accounts || []) {
     const card = cards.find((c) => c.sfin_id === a.id); if (!card) continue;
     // balance_at = la fecha en que el banco reportó el saldo (no la de la sincronización)
-    if (updateBalances) await env.DB.prepare("UPDATE cards SET balance = ?, available = ?, balance_at = ?, bank_balance_at = ?, currency = ? WHERE id = ?").bind(num(a.balance), num(a["available-balance"]), a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : now(), a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : null, a.currency || "USD", card.id).run();
+    // Algunos bancos (p. ej. Credit One) mandan como "saldo" de la tarjeta el crédito disponible con signo negativo.
+    // Si el saldo es exactamente el disponible y conocemos el límite, la deuda real es límite − disponible.
+    let bal = num(a.balance); const avail = num(a["available-balance"]);
+    if (card.card_type === "credito" && Number(card.credit_limit) > 0 && bal != null && avail != null && avail > 0 && Math.abs(bal + avail) < 0.005) bal = -Math.max(0, Math.round((Number(card.credit_limit) - avail) * 100) / 100);
+    if (updateBalances) await env.DB.prepare("UPDATE cards SET balance = ?, available = ?, balance_at = ?, bank_balance_at = ?, currency = ? WHERE id = ?").bind(bal, avail, a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : now(), a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : null, a.currency || "USD", card.id).run();
     // Las tarjetas personales registradas en una empresa (para sus facturas) llevan sus movimientos al espacio Personal
     const ent = String(card.entity_id || "").startsWith("sp:") ? card.entity_id : card.entity_id === "personal" || card.owner === "personal" || !card.entity_id ? "personal" : card.entity_id;
     const ids = (a.transactions || []).map((t) => `sfin:${a.id}:${t.id}`);
