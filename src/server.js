@@ -29,7 +29,7 @@ const MIGRATIONS = [
   "CREATE INDEX IF NOT EXISTS bank_ext ON bank_lines(ext_id)",
   "ALTER TABLE cards ADD COLUMN others_money INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE bank_lines ADD COLUMN cat_manual INTEGER NOT NULL DEFAULT 0",
-  "ALTER TABLE cards ADD COLUMN available REAL", "ALTER TABLE cards ADD COLUMN bank_balance_at TEXT", "ALTER TABLE cards ADD COLUMN hide_summary INTEGER NOT NULL DEFAULT 0", "ALTER TABLE cards ADD COLUMN money_owner TEXT", "ALTER TABLE bank_lines ADD COLUMN owner TEXT", "ALTER TABLE users ADD COLUMN access TEXT",
+  "ALTER TABLE cards ADD COLUMN available REAL", "ALTER TABLE cards ADD COLUMN bank_balance_at TEXT", "ALTER TABLE cards ADD COLUMN hide_summary INTEGER NOT NULL DEFAULT 0", "ALTER TABLE cards ADD COLUMN balance_manual INTEGER NOT NULL DEFAULT 0", "ALTER TABLE cards ADD COLUMN money_owner TEXT", "ALTER TABLE bank_lines ADD COLUMN owner TEXT", "ALTER TABLE users ADD COLUMN access TEXT",
   "CREATE TABLE IF NOT EXISTS spaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, person TEXT NOT NULL, created_at TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS space_cards (space_id TEXT NOT NULL, card_id TEXT NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (space_id, card_id))",
   "CREATE TABLE IF NOT EXISTS p_rules (id TEXT PRIMARY KEY, pattern TEXT NOT NULL UNIQUE, category TEXT NOT NULL, created_at TEXT NOT NULL)",
@@ -464,7 +464,7 @@ async function sfinSync(env, days = 30, fromDate = null, sid = "personal") {
   return status;
 }
 async function sfinStore(env, data, updateBalances, touched) {
-  const cards = (await env.DB.prepare("SELECT id, entity_id, owner, sfin_id, card_type, credit_limit FROM cards WHERE sfin_id IS NOT NULL").all()).results;
+  const cards = (await env.DB.prepare("SELECT id, entity_id, owner, sfin_id, card_type, credit_limit, balance_manual FROM cards WHERE sfin_id IS NOT NULL").all()).results;
   let added = 0;
   for (const a of data.accounts || []) {
     const card = cards.find((c) => c.sfin_id === a.id); if (!card) continue;
@@ -473,7 +473,8 @@ async function sfinStore(env, data, updateBalances, touched) {
     // Si el saldo es exactamente el disponible y conocemos el límite, la deuda real es límite − disponible.
     let bal = num(a.balance); const avail = num(a["available-balance"]);
     if (card.card_type === "credito" && Number(card.credit_limit) > 0 && bal != null && avail != null && avail > 0 && Math.abs(bal + avail) < 0.005) bal = -Math.max(0, Math.round((Number(card.credit_limit) - avail) * 100) / 100);
-    if (updateBalances) await env.DB.prepare("UPDATE cards SET balance = ?, available = ?, balance_at = ?, bank_balance_at = ?, currency = ? WHERE id = ?").bind(bal, avail, a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : now(), a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : null, a.currency || "USD", card.id).run();
+    // Saldo corregido a mano (el banco manda datos que no cuadran): la conexión trae movimientos pero no lo sobrescribe
+    if (updateBalances && !card.balance_manual) await env.DB.prepare("UPDATE cards SET balance = ?, available = ?, balance_at = ?, bank_balance_at = ?, currency = ? WHERE id = ?").bind(bal, avail, a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : now(), a["balance-date"] ? new Date(a["balance-date"] * 1000).toISOString() : null, a.currency || "USD", card.id).run();
     // Las tarjetas personales registradas en una empresa (para sus facturas) llevan sus movimientos al espacio Personal
     const ent = String(card.entity_id || "").startsWith("sp:") ? card.entity_id : card.entity_id === "personal" || card.owner === "personal" || !card.entity_id ? "personal" : card.entity_id;
     const ids = (a.transactions || []).map((t) => `sfin:${a.id}:${t.id}`);
@@ -1924,8 +1925,9 @@ async function api(req, env, url, user) {
     } else if (mm[2] === "others") {
       await env.DB.prepare("UPDATE cards SET others_money = ?, money_owner = ? WHERE id = ?").bind(b.others ? 1 : 0, b.others ? null : "personal", mm[1]).run();
     } else {
-      if (c.sfin_id) return fail("Esta cuenta se actualiza sola con la conexión bancaria.");
-      await env.DB.prepare("UPDATE cards SET balance = ?, available = NULL, balance_at = ? WHERE id = ?").bind(num(b.balance), now(), mm[1]).run();
+      // Con conexión bancaria: corregir a mano deja el saldo fijo hasta que se vuelva al del banco
+      if (c.sfin_id && b.auto) { await env.DB.prepare("UPDATE cards SET balance_manual = 0 WHERE id = ?").bind(mm[1]).run(); return json({ ok: true }); }
+      await env.DB.prepare("UPDATE cards SET balance = ?, available = NULL, balance_at = ?, balance_manual = ? WHERE id = ?").bind(num(b.balance), now(), c.sfin_id ? 1 : 0, mm[1]).run();
     }
     return json({ ok: true });
   }

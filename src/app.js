@@ -870,7 +870,7 @@ async function cardsView(entityId) {
       debit ? "" : kv("Día límite de pago", c.due_day ? "Día " + c.due_day : ""), debit ? "" : kv("Límite de crédito", c.credit_limit != null ? money(c.credit_limit) : ""),
       kv("Es de", c.owner === "empresa" ? "La empresa" : "Uso personal"), c.notes ? kv("Notas", c.notes) : "",
       c.balance != null ? kv(c.card_type === "debito" ? "Saldo" : c.card_type === "prestamo" ? "Saldo del préstamo" : "Saldo de la tarjeta", (c.card_type !== "debito" && c.balance < 0 ? "Debes " : "") + money(Math.abs(c.balance), c.currency || "USD") + (c.balance_at ? ` · ${fdate(c.balance_at)}` : "")) : "",
-      c.sfin_id ? kv("Conexión", "Automática (SimpleFIN)") : "",
+      c.sfin_id ? kv("Conexión", c.balance_manual ? "Automática (SimpleFIN) · saldo corregido a mano" : "Automática (SimpleFIN)") : "",
       isFinEnt(entityId) && c.company ? kv("¿De quién es el dinero?", "Starkum (empresa) · se administra en la empresa") : isFinEnt(entityId) ? h("div", null, h("span", null, "¿De quién es el dinero?"), h("select", { style: "width:auto;margin-top:4px", "aria-label": "Dueño del dinero de esta cuenta", onchange: async (e) => { const v = e.target.value; await api(`/personal/accounts/${c.id}/owner`, { method: "PUT", body: { owner: v } }); toast(v === "personal" ? "Marcada como tuya." : `Marcada como dinero de ${ownerName(v, state.people)}: sus movimientos son de esa persona salvo que cambies alguno.`); route(); } },
         ownerList(state.people).filter(([k]) => k !== "starkum").map(([k, l]) => h("option", { value: k, selected: k === effOwner(c) }, l)), !effOwner(c) ? h("option", { value: "", selected: true, disabled: true }, "Otra persona (elige quién)") : "")) : "");
   };
@@ -887,7 +887,7 @@ async function cardsView(entityId) {
           h("div", { class: "stack", style: "gap:2px" }, h("b", { style: "font-size:17px" }, c.nickname),
             isFinEnt(entityId) ? balanceLine(c) : h("span", { class: "small" }, `${c.uses.n} factura${c.uses.n === 1 ? "" : "s"} pagada${c.uses.n === 1 ? "" : "s"} con ella · ${money(c.uses.total)}`),
             !c.entity_id ? h("span", { class: "small muted" }, "Se usa en todas las empresas") : "")),
-        h("div", { class: "row only-admin" }, isFinEnt(entityId) && !c.sfin_id ? h("button", { class: "btn sm", type: "button", onclick: () => balanceDialog(c) }, "Actualizar saldo") : "", h("button", { class: "btn sm", type: "button", onclick: () => cardDialog(c, entityId) }, "Editar"),
+        h("div", { class: "row only-admin" }, isFinEnt(entityId) && !c.company ? h("button", { class: "btn sm", type: "button", onclick: () => balanceDialog(c) }, c.sfin_id ? "Corregir saldo" : "Actualizar saldo") : "", h("button", { class: "btn sm", type: "button", onclick: () => cardDialog(c, entityId) }, "Editar"),
           c.shared ? "" : h("button", { class: "btn sm danger", type: "button", onclick: () => confirmDelete("Eliminar tarjeta", `Se borra ${c.nickname} •••• ${c.last4} y sus estados de cuenta. Las facturas no se borran: quedan sin tarjeta asociada.`, async () => { await api("/cards/" + c.id, { method: "DELETE" }); toast("Tarjeta eliminada."); route(); }) }, "Eliminar"))),
       info(c), cyclesView(c)))))) : h("section", { class: "card" }, h("p", { class: "empty" }, "Todavía no hay tarjetas de esta empresa. Agrega cada tarjeta con la que compras.")));
 }
@@ -1478,7 +1478,8 @@ function balancesTable(cards) {
 function balanceDialog(c) {
   modal("Saldo de " + c.nickname, () => h("div", { class: "stack" },
     fld(c.card_type === "debito" ? "Saldo actual de la cuenta" : "Lo que debes en la tarjeta", h("input", { name: "balance", type: "number", step: "0.01", required: true, inputmode: "decimal", value: c.balance != null ? Math.abs(c.balance) : "" })),
-    h("p", { class: "small muted", style: "margin:0" }, "Si conectas esta cuenta con SimpleFIN, el saldo se actualiza solo todos los días.")),
+    h("p", { class: "small muted", style: "margin:0" }, c.sfin_id ? "Úsalo si el banco manda un saldo que no cuadra. Queda fijo (los movimientos siguen llegando) hasta que vuelvas al saldo del banco." : "Si conectas esta cuenta con SimpleFIN, el saldo se actualiza solo todos los días."),
+    c.sfin_id && c.balance_manual ? h("button", { class: "btn sm", type: "button", onclick: async () => { await api(`/personal/accounts/${c.id}/balance`, { method: "PUT", body: { auto: true } }); toast("Listo: el saldo vuelve a venir del banco en la próxima sincronización."); document.querySelector("dialog[open]")?.close(); route(); } }, "Volver al saldo del banco") : ""),
   async (fd) => { const v = Math.abs(Number(fd.get("balance")) || 0); await api(`/personal/accounts/${c.id}/balance`, { method: "PUT", body: { balance: c.card_type === "debito" ? v : -v } }); toast("Saldo actualizado."); route(); });
 }
 let sfinCheck = false;
