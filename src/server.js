@@ -29,7 +29,7 @@ const MIGRATIONS = [
   "CREATE INDEX IF NOT EXISTS bank_ext ON bank_lines(ext_id)",
   "ALTER TABLE cards ADD COLUMN others_money INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE bank_lines ADD COLUMN cat_manual INTEGER NOT NULL DEFAULT 0",
-  "ALTER TABLE cards ADD COLUMN available REAL", "ALTER TABLE cards ADD COLUMN bank_balance_at TEXT", "ALTER TABLE cards ADD COLUMN hide_summary INTEGER NOT NULL DEFAULT 0", "ALTER TABLE cards ADD COLUMN balance_manual INTEGER NOT NULL DEFAULT 0", "ALTER TABLE cards ADD COLUMN money_owner TEXT", "ALTER TABLE bank_lines ADD COLUMN owner TEXT", "ALTER TABLE users ADD COLUMN access TEXT",
+  "ALTER TABLE cards ADD COLUMN available REAL", "ALTER TABLE cards ADD COLUMN bank_balance_at TEXT", "ALTER TABLE cards ADD COLUMN hide_summary INTEGER NOT NULL DEFAULT 0", "ALTER TABLE cards ADD COLUMN balance_manual INTEGER NOT NULL DEFAULT 0", "ALTER TABLE cards ADD COLUMN pay_ref TEXT", "ALTER TABLE cards ADD COLUMN feed_dupe_of TEXT", "ALTER TABLE cards ADD COLUMN money_owner TEXT", "ALTER TABLE bank_lines ADD COLUMN owner TEXT", "ALTER TABLE users ADD COLUMN access TEXT",
   "CREATE TABLE IF NOT EXISTS spaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, person TEXT NOT NULL, created_at TEXT NOT NULL)",
   "CREATE TABLE IF NOT EXISTS space_cards (space_id TEXT NOT NULL, card_id TEXT NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (space_id, card_id))",
   "CREATE TABLE IF NOT EXISTS p_rules (id TEXT PRIMARY KEY, pattern TEXT NOT NULL UNIQUE, category TEXT NOT NULL, created_at TEXT NOT NULL)",
@@ -504,6 +504,9 @@ async function sfinStore(env, data, updateBalances, touched) {
     }
     for (let i = 0; i < ins.length; i += 80) await env.DB.batch(ins.slice(i, i + 80));
   }
+  // Algunos bancos (Credit One) mandan a una tarjeta movimientos que son de otra: los que repiten exactamente los de la tarjeta indicada se ignoran
+  for (const c of (await env.DB.prepare("SELECT id, feed_dupe_of FROM cards WHERE feed_dupe_of IS NOT NULL AND feed_dupe_of != ''").all()).results)
+    await env.DB.prepare("UPDATE bank_lines SET status = 'ignorado' WHERE card_id = ? AND status != 'ignorado' AND ext_id LIKE 'sfin:%' AND EXISTS (SELECT 1 FROM bank_lines v WHERE v.card_id = ? AND v.posted_on = bank_lines.posted_on AND ABS(v.amount - bank_lines.amount) < 0.005 AND v.description = bank_lines.description)").bind(c.id, c.feed_dupe_of).run();
   return added;
 }
 
@@ -1881,6 +1884,9 @@ async function api(req, env, url, user) {
       };
       const visibleBrands = new Set(accts.flatMap(brands));
       const hiddenBrands = new Set(allAccts.filter((a) => hidden.has(a.id)).flatMap(brands).filter((b) => !visibleBrands.has(b)));
+      // Pagos hechos desde otra cuenta que llevan el número de referencia de una cuenta oculta (p. ej. "*2448 PAYMENT CREDIT ONE BANK")
+      const refs = allAccts.filter((a) => hidden.has(a.id) && a.pay_ref).map((a) => "*" + a.pay_ref);
+      if (refs.length) lines.results = lines.results.filter((l) => !refs.some((r) => String(l.description || "").includes(r)));
       if (hiddenBrands.size) lines.results = lines.results.filter((l) => { const d = norm(l.description); for (const b of hiddenBrands) if (d.includes(b)) return false; return true; });
       cycles.results = cycles.results.filter((c) => !hidden.has(c.card_id));
     }
@@ -1982,7 +1988,7 @@ async function api(req, env, url, user) {
   }
   if (p === "/personal/people" && m === "GET") { const sp = await getSpace(env, sid); return json({ people: await peopleFor(env, sid), self: sp?.person || "personal" }); }
   // De quién es el dinero de una cuenta (lo que entra y sale de ella se asigna a esa persona por defecto)
-  if ((mm = p.match(/^\/personal\/accounts\/([\w-]+)\/(owner|visible|others|balance)$/)) && m === "PUT") {
+  if ((mm = p.match(/^\/personal\/accounts\/([\w-]+)\/(owner|visible|others|balance|payref|dupe)$/)) && m === "PUT") {
     const c = await env.DB.prepare("SELECT * FROM cards WHERE id = ?").bind(mm[1]).first();
     if (!(await cardOk(c))) return fail("No encontrado.", 404);
     const b = await body();
@@ -1994,6 +2000,14 @@ async function api(req, env, url, user) {
       const sharedHere = sid !== "personal" && c.entity_id !== "sp:" + sid;
       if (sharedHere) await env.DB.prepare("UPDATE space_cards SET hidden = ? WHERE space_id = ? AND card_id = ?").bind(b.show ? 0 : 1, sid, mm[1]).run();
       else await env.DB.prepare("UPDATE cards SET hide_summary = ? WHERE id = ?").bind(b.show ? 0 : 1, mm[1]).run();
+    } else if (mm[2] === "payref") {
+      const ref = String(b.ref || "").replace(/\D/g, "").slice(0, 8) || null;
+      await env.DB.prepare("UPDATE cards SET pay_ref = ? WHERE id = ?").bind(ref, mm[1]).run();
+    } else if (mm[2] === "dupe") {
+      const of = b.of ? String(b.of) : null;
+      if (of && (of === mm[1] || !(await env.DB.prepare("SELECT id FROM cards WHERE id = ?").bind(of).first()))) return fail("Tarjeta no válida.");
+      await env.DB.prepare("UPDATE cards SET feed_dupe_of = ? WHERE id = ?").bind(of, mm[1]).run();
+      if (of) await env.DB.prepare("UPDATE bank_lines SET status = 'ignorado' WHERE card_id = ? AND status != 'ignorado' AND ext_id LIKE 'sfin:%' AND EXISTS (SELECT 1 FROM bank_lines v WHERE v.card_id = ? AND v.posted_on = bank_lines.posted_on AND ABS(v.amount - bank_lines.amount) < 0.005 AND v.description = bank_lines.description)").bind(mm[1], of).run();
     } else if (mm[2] === "others") {
       await env.DB.prepare("UPDATE cards SET others_money = ?, money_owner = ? WHERE id = ?").bind(b.others ? 1 : 0, b.others ? null : "personal", mm[1]).run();
     } else {
