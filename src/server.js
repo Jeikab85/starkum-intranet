@@ -1865,8 +1865,23 @@ async function api(req, env, url, user) {
     // En el Resumen no aparecen las cuentas ocultas en este perfil (ni en totales ni en categorías)
     if (url.searchParams.get("scope") === "resumen") {
       const hidden = new Set(accts.filter((a) => a.hide_summary).map((a) => a.id));
+      const allAccts = accts;
       accts = accts.filter((a) => !hidden.has(a.id));
       lines.results = lines.results.filter((l) => !hidden.has(l.card_id));
+      // También se van los movimientos de otras cuentas que son pagos o cargos de una cuenta oculta (p. ej. "ACH DEBIT DISCOVER" en el banco)
+      const GENERIC = new Set(["bank", "banco", "financial", "services", "service", "card", "visa", "mastercard", "signature", "platinum", "checking", "savings", "performance", "chrome", "personal", "business", "credit", "loan", "prestamo", "del", "carro", "the", "and", "usa", "na", "inc", "llc", "corp", "cash", "rewards", "account", "cuenta", "tarjeta"]);
+      const norm = (t) => String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+      const words = (t) => String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9]+/).filter(Boolean);
+      const brands = (a) => {
+        const out = new Set();
+        const iss = words(a.issuer); const core = iss.filter((w) => !GENERIC.has(w) || (w === "credit" && iss.includes("one")));
+        if (core.length) out.add(core.join(""));
+        for (const w of words(a.nickname)) if (w.length >= 5 && !GENERIC.has(w) && !/^\d+$/.test(w)) out.add(w);
+        return [...out].filter((b) => b.length >= 4);
+      };
+      const visibleBrands = new Set(accts.flatMap(brands));
+      const hiddenBrands = new Set(allAccts.filter((a) => hidden.has(a.id)).flatMap(brands).filter((b) => !visibleBrands.has(b)));
+      if (hiddenBrands.size) lines.results = lines.results.filter((l) => { const d = norm(l.description); for (const b of hiddenBrands) if (d.includes(b)) return false; return true; });
       cycles.results = cycles.results.filter((c) => !hidden.has(c.card_id));
     }
     const people = await peopleFor(env, sid);
