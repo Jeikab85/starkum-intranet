@@ -1251,7 +1251,8 @@ async function moveDialog(ent, line) {
 
 // ---------- espacio Personal (solo el administrador lo ve) ----------
 const connHidden = () => !!(state.conn && state.conn.set && !state.conn.unlocked);
-const ptabs = () => PTABS.filter((t) => t[0] !== "conexion" || !connHidden());
+const LOCKED_TABS = ["movimientos", "cuentas", "conexion"];
+const ptabs = () => PTABS.filter((t) => !LOCKED_TABS.includes(t[0]) || !connHidden());
 const PTABS = [["resumen", "Resumen"], ["movimientos", "Movimientos"], ["cuentas", "Cuentas y tarjetas"], ["suscripciones", "Suscripciones"], ["conexion", "Conexión bancaria"]];
 function monthNav(base, month, year) {
   const [y, m] = month.split("-").map(Number);
@@ -1281,7 +1282,8 @@ async function pagePersonal(tab, q, sid = "personal") {
   const month = /^\d{4}-\d{2}$/.test(q.get("mes") || "") ? q.get("mes") : new Date().toISOString().slice(0, 7);
   const year = /^\d{4}$/.test(q.get("anio") || "") ? q.get("anio") : null;
   let content;
-  if (tab === "cuentas") { state.fxRate = (await api("/fx/ves").catch(() => ({}))).fx?.rate || 0; content = await cardsView(entId); }
+  if (connHidden() && (tab === "cuentas" || tab === "movimientos")) content = connGate();
+  else if (tab === "cuentas") { state.fxRate = (await api("/fx/ves").catch(() => ({}))).fx?.rate || 0; content = await cardsView(entId); }
   else if (tab === "suscripciones") content = await subsView(ent, null, q);
   else if (tab === "conexion") content = connHidden() ? connGate() : await sfinView();
   else {
@@ -1499,7 +1501,7 @@ function looseBox(pcards, accounts) {
 function askConnPin() {
   modal("Acceso protegido", () => fld("Clave", h("input", { name: "pin", type: "password", required: true, autocomplete: "off", autofocus: true })), async (fd) => {
     await api("/personal/sfin/pin", { method: "POST", body: { action: "unlock", pin: fd.get("pin") } });
-    location.hash = `${PB()}/conexion`; route();
+    route();
   }, "Entrar");
 }
 function connGate() {
@@ -1521,7 +1523,7 @@ function pinBox() {
     await api("/personal/sfin/pin", { method: "POST", body: { action: "remove", current: fd.get("cur") } }); toast("Clave quitada."); route();
   }, "Quitar");
   return h("section", { class: "card stack" }, h("h2", null, "Clave de acceso"),
-    h("p", { class: "small", style: "margin:0" }, c.set ? "Esta pestaña está protegida: queda oculta y pide la clave (se mantiene abierta 15 minutos)." : "Sin clave, cualquiera con acceso a este perfil ve esta pestaña. Pon una clave para ocultarla y protegerla."),
+    h("p", { class: "small", style: "margin:0" }, c.set ? "Movimientos, Cuentas y tarjetas y Conexión bancaria están protegidas: quedan ocultas y piden la clave (se mantienen abiertas 15 minutos)." : "Sin clave, cualquiera con acceso a este perfil ve Movimientos, Cuentas y tarjetas y esta pestaña. Pon una clave para ocultarlas y protegerlas."),
     h("div", { class: "row", style: "gap:8px;flex-wrap:wrap" }, h("button", { class: "btn" + (c.set ? "" : " primary"), type: "button", onclick: setPin }, c.set ? "Cambiar clave" : "Poner clave"),
       c.set ? h("button", { class: "btn", type: "button", onclick: async () => { await api("/personal/sfin/pin", { method: "POST", body: { action: "lock" } }); toast("Pestaña bloqueada."); location.hash = PB() + "/resumen"; route(); } }, "Bloquear ahora") : "",
       c.set ? h("button", { class: "btn", type: "button", onclick: rm }, "Quitar clave") : ""));
