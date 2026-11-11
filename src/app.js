@@ -134,7 +134,7 @@ function shell(content, active) {
     ent && isFinEnt(ent.id) ? [
       h("div", { class: "navgroup" }, h("span", { class: "label" }, "Finanzas"),
         h("a", { href: "#/", class: "entswitch", title: "Volver a elegir" }, h("b", null, ent.id === "personal" && state.owner ? "Mis finanzas" : ent.name), h("span", null, state.entities.length > 1 ? "Cambiar de espacio" : "Tu espacio")),
-        PTABS.map(([k, l]) => a(`${PB()}/${k}`, `personal-${k}`, l)))
+        ptabs().map(([k, l]) => a(`${PB()}/${k}`, `personal-${k}`, l)))
     ] : ent ? [
       h("div", { class: "navgroup" }, h("span", { class: "label" }, "Empresa"),
         h("a", { href: "#/", class: "entswitch", title: "Volver a elegir empresa" }, h("b", null, ent.name), h("span", null, "Cambiar de empresa")),
@@ -1250,6 +1250,8 @@ async function moveDialog(ent, line) {
 }
 
 // ---------- espacio Personal (solo el administrador lo ve) ----------
+const connHidden = () => !!(state.conn && state.conn.set && !state.conn.unlocked);
+const ptabs = () => PTABS.filter((t) => t[0] !== "conexion" || !connHidden());
 const PTABS = [["resumen", "Resumen"], ["movimientos", "Movimientos"], ["cuentas", "Cuentas y tarjetas"], ["suscripciones", "Suscripciones"], ["conexion", "Conexión bancaria"]];
 function monthNav(base, month, year) {
   const [y, m] = month.split("-").map(Number);
@@ -1269,18 +1271,19 @@ async function pagePersonal(tab, q, sid = "personal") {
   const act = "personal-" + tab;
   shell(loading(), act);
   const ent = state.entities.find((e) => e.id === entId) || { id: entId, name: "Personal", details: {} };
-  const pp = await api("/personal/people").catch(() => ({ people: [], self: "personal" }));
+  const [pp, cp] = await Promise.all([api("/personal/people").catch(() => ({ people: [], self: "personal" })), api("/personal/sfin/pin").catch(() => ({ set: false, unlocked: true }))]);
+  state.conn = cp;
   state.people = pp.people; state.self = pp.self || "personal";
   const title = sid === "personal" && state.owner ? "Mis finanzas" : ent.name;
   const eyebrow = state.readOnly ? "Solo puedes ver este perfil" : sid === "personal" ? (state.owner ? "Personal · solo tú lo ves" : "Perfil de finanzas") : state.spaceOnly ? "Tu espacio de finanzas" : "Perfil de finanzas · lo ven tú y quien autorices";
   const head = [h("div", { class: "head" }, h("div", { class: "row", style: "gap:14px;align-items:center;flex-wrap:nowrap" }, entityLogo(ent, 56), h("div", null, h("span", { class: "eyebrow" }, eyebrow), h("h1", null, title)))),
-    h("div", { class: "tabs", role: "tablist" }, PTABS.map(([k, l]) => h("a", { href: `${PB()}/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)))];
+    h("div", { class: "tabs", role: "tablist" }, ptabs().map(([k, l]) => h("a", { href: `${PB()}/${k}`, class: k === tab ? "on" : "", role: "tab", "aria-selected": String(k === tab) }, l)), connHidden() ? h("button", { class: "btn sm", type: "button", title: "Acceso protegido", "aria-label": "Acceso protegido", style: "margin-left:auto;align-self:center;opacity:.55", onclick: () => askConnPin() }, "🔒") : "")];
   const month = /^\d{4}-\d{2}$/.test(q.get("mes") || "") ? q.get("mes") : new Date().toISOString().slice(0, 7);
   const year = /^\d{4}$/.test(q.get("anio") || "") ? q.get("anio") : null;
   let content;
   if (tab === "cuentas") { state.fxRate = (await api("/fx/ves").catch(() => ({}))).fx?.rate || 0; content = await cardsView(entId); }
   else if (tab === "suscripciones") content = await subsView(ent, null, q);
-  else if (tab === "conexion") content = await sfinView();
+  else if (tab === "conexion") content = connHidden() ? connGate() : await sfinView();
   else {
     const d = await api("/personal/summary?" + (year ? "year=" + year : "month=" + month) + (tab === "movimientos" ? "" : "&scope=resumen"));
     content = tab === "movimientos" ? personalMoves(d, month, year) : personalSummary(d, month, year);
@@ -1493,6 +1496,36 @@ function looseBox(pcards, accounts) {
       h("label", { class: "row small", style: "gap:6px;white-space:nowrap;cursor:pointer" }, h("input", { type: "checkbox", checked: !c.hide_summary, style: "width:auto", onchange: async (e) => { const on = e.target.checked; e.target.disabled = true;
         try { await api(`/personal/accounts/${c.id}/visible`, { method: "PUT", body: { show: on } }); toast(on ? `${c.nickname}: se muestra en el Resumen.` : `${c.nickname}: oculta en el Resumen.`); } catch (err) { e.target.checked = !on; toast(err.message); } finally { e.target.disabled = false; } } }), "Mostrar en Resumen")))) : "";
 }
+function askConnPin() {
+  modal("Acceso protegido", () => fld("Clave", h("input", { name: "pin", type: "password", required: true, autocomplete: "off", autofocus: true })), async (fd) => {
+    await api("/personal/sfin/pin", { method: "POST", body: { action: "unlock", pin: fd.get("pin") } });
+    location.hash = `${PB()}/conexion`; route();
+  }, "Entrar");
+}
+function connGate() {
+  return h("section", { class: "card stack", style: "max-width:420px" }, h("h2", null, "Acceso protegido"), h("p", { class: "small muted", style: "margin:0" }, "Introduce la clave para continuar."),
+    h("form", { class: "row", style: "gap:8px", onsubmit: async (e) => { e.preventDefault(); const v = e.target.elements.pin.value; await busy(e.target.querySelector("button"), async () => { await api("/personal/sfin/pin", { method: "POST", body: { action: "unlock", pin: v } }); route(); }); } },
+      h("input", { name: "pin", type: "password", required: true, autocomplete: "off", placeholder: "Clave", style: "flex:1;min-width:160px" }), h("button", { class: "btn primary", type: "submit" }, "Entrar")));
+}
+function pinBox() {
+  const c = state.conn || {};
+  const setPin = () => modal(c.set ? "Cambiar la clave" : "Poner una clave", () => h("div", { class: "stack" },
+    c.set ? fld("Clave actual", h("input", { name: "cur", type: "password", required: true, autocomplete: "off" })) : "",
+    fld("Clave nueva (4 a 32 caracteres)", h("input", { name: "pin", type: "password", required: true, minlength: 4, maxlength: 32, autocomplete: "new-password" })),
+    fld("Repite la clave", h("input", { name: "pin2", type: "password", required: true, autocomplete: "new-password" }))), async (fd) => {
+    if (fd.get("pin") !== fd.get("pin2")) throw new Error("Las dos claves no coinciden.");
+    await api("/personal/sfin/pin", { method: "POST", body: { action: "set", pin: fd.get("pin"), current: fd.get("cur") || "" } });
+    toast("Clave guardada."); route();
+  });
+  const rm = () => modal("Quitar la clave", () => fld("Clave actual", h("input", { name: "cur", type: "password", required: true, autocomplete: "off" })), async (fd) => {
+    await api("/personal/sfin/pin", { method: "POST", body: { action: "remove", current: fd.get("cur") } }); toast("Clave quitada."); route();
+  }, "Quitar");
+  return h("section", { class: "card stack" }, h("h2", null, "Clave de acceso"),
+    h("p", { class: "small", style: "margin:0" }, c.set ? "Esta pestaña está protegida: queda oculta y pide la clave (se mantiene abierta 15 minutos)." : "Sin clave, cualquiera con acceso a este perfil ve esta pestaña. Pon una clave para ocultarla y protegerla."),
+    h("div", { class: "row", style: "gap:8px;flex-wrap:wrap" }, h("button", { class: "btn" + (c.set ? "" : " primary"), type: "button", onclick: setPin }, c.set ? "Cambiar clave" : "Poner clave"),
+      c.set ? h("button", { class: "btn", type: "button", onclick: async () => { await api("/personal/sfin/pin", { method: "POST", body: { action: "lock" } }); toast("Pestaña bloqueada."); location.hash = PB() + "/resumen"; route(); } }, "Bloquear ahora") : "",
+      c.set ? h("button", { class: "btn", type: "button", onclick: rm }, "Quitar clave") : ""));
+}
 async function sfinView() {
   const d = await api("/personal/summary");
   const st = d.sfin;
@@ -1556,7 +1589,7 @@ async function sfinView() {
       h("p", { class: "small muted", style: "margin:0" }, state.space && state.space !== "personal" ? "Las cuentas de Venezuela no están en SimpleFIN: agrégalas en \"Cuentas y tarjetas\" con moneda Bolívares y actualiza su saldo a mano o leyendo el extracto." : "Si una cuenta es de la empresa (por ejemplo, la Chase de Starkum), asígnala a la cuenta de la LLC: sus movimientos llegan solos a la conciliación del banco de la empresa."));
   }
   if (!st.connected && state.space && state.space !== "personal") { const pc = (await api("/cards?entity=" + FENT())).cards; const lb = looseBox(pc, []); if (lb) accBox = h("section", { class: "card stack" }, lb); }
-  return h("div", { class: "stack", style: "gap:16px" }, state.owner ? vaultBox : "", connectBox, accBox);
+  return h("div", { class: "stack", style: "gap:16px" }, state.owner ? vaultBox : "", connectBox, accBox, pinBox());
 }
 // ---------- bancos de la empresa (como "Mis finanzas", pero de la empresa) ----------
 async function companyBanks(ent, q) {

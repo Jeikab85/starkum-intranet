@@ -51,6 +51,11 @@ async function sha256(text) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+async function pinHash(pin, salt) {
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: new TextEncoder().encode(salt), iterations: 100000 }, k, 256);
+  return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 function randomHex(bytes) {
   const a = new Uint8Array(bytes); crypto.getRandomValues(a);
   return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -1958,6 +1963,56 @@ async function api(req, env, url, user) {
     return json({ ok: true });
   }
   if (p === "/fx/ves" && m === "GET") return json({ fx: await vesRate(env) });
+  // ---------- Clave de acceso de la Conexión bancaria ----------
+  const pinCfg = async () => { const v = (await env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(sfKey(sid, "conn_pin")).first())?.value; return v ? JSON.parse(v) : null; };
+  const unlockKey = async () => `conn_unlock:${sid}:${await sha256(cookie(req, "sid") || "")}`;
+  const connUnlocked = async () => {
+    if (!(await pinCfg())) return true;
+    const v = (await env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(await unlockKey()).first())?.value;
+    return !!v && Date.parse(v) > Date.now();
+  };
+  if (p === "/personal/sfin/pin") {
+    const cfg = await pinCfg();
+    if (m === "GET") return json({ set: !!cfg, unlocked: await connUnlocked() });
+    if (m !== "POST") return fail("No encontrado.", 404);
+    const b = await body(); const action = String(b.action || ""); const pin = String(b.pin || ""); const failKey = sfKey(sid, "conn_pin_fail");
+    // Intentos: 5 fallos seguidos bloquean 15 minutos
+    const checkPin = async (value) => {
+      const f = JSON.parse((await env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(failKey).first())?.value || "{}");
+      if (f.until && Date.parse(f.until) > Date.now()) return { err: "Demasiados intentos. Espera unos minutos e inténtalo de nuevo.", status: 429 };
+      const ok = cfg && (await pinHash(value, cfg.salt)) === cfg.hash;
+      if (ok) { await env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(failKey).run(); return { ok: true }; }
+      const n = (f.until ? 0 : f.n || 0) + 1;
+      await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(failKey, JSON.stringify(n >= 5 ? { n: 0, until: new Date(Date.now() + 15 * 60000).toISOString() } : { n })).run();
+      return { err: n >= 5 ? "Demasiados intentos. Espera 15 minutos." : "La clave no es correcta.", status: 403 };
+    };
+    const unlock = async () => env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(await unlockKey(), new Date(Date.now() + 15 * 60000).toISOString()).run();
+    if (action === "lock") { await env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(await unlockKey()).run(); return json({ ok: true }); }
+    if (action === "unlock") {
+      if (!cfg) return json({ ok: true });
+      const r = await checkPin(pin); if (!r.ok) return fail(r.err, r.status);
+      await unlock(); return json({ ok: true });
+    }
+    if (!canWriteSpace(sid)) return fail("Solo quien administra este perfil puede cambiar la clave.", 403);
+    if (action === "set") {
+      if (cfg) { const r = await checkPin(String(b.current || "")); if (!r.ok) return fail(r.err.replace("La clave", "La clave actual"), r.status); }
+      if (pin.length < 4 || pin.length > 32) return fail("La clave debe tener entre 4 y 32 caracteres.");
+      const salt = randomHex(16);
+      await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(sfKey(sid, "conn_pin"), JSON.stringify({ salt, hash: await pinHash(pin, salt) })).run();
+      await env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(failKey).run();
+      await unlock();
+      return json({ ok: true });
+    }
+    if (action === "remove") {
+      if (!cfg) return json({ ok: true });
+      const r = await checkPin(String(b.current || pin)); if (!r.ok) return fail(r.err, r.status);
+      await env.DB.batch([env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(sfKey(sid, "conn_pin")), env.DB.prepare("DELETE FROM settings WHERE key LIKE ?").bind(`conn_unlock:${sid}:%`)]);
+      return json({ ok: true });
+    }
+    return fail("Acción no válida.");
+  }
+  // Con clave puesta, todo lo de la conexión bancaria (menos sincronizar) exige haberla introducido
+  if (p.startsWith("/personal/sfin") && p !== "/personal/sfin/sync" && !(await connUnlocked())) return fail("La Conexión bancaria está protegida. Introduce tu clave.", 423);
   // ---------- SimpleFIN (cada perfil con su propia conexión) ----------
   if (p === "/personal/sfin/connect" && m === "POST") {
     const b = await body();
